@@ -421,6 +421,118 @@ class PrusaSlicer(BaseSlicer):
     def parse_layer_count(self) -> Optional[int]:
         return regex_find_int(r"; total layers count = (%D)", self.footer_data)
 
+class PantheonSlicer(BaseSlicer):
+    def check_identity(self, data: str) -> Optional[Dict[str, str]]:
+        aliases = {
+            'PantheonSlicer': r"PantheonSlicer\s(.*)\son"
+        }
+        for name, expr in aliases.items():
+            match = re.search(expr, data)
+            if match:
+                return {
+                    'slicer': name,
+                    'slicer_version': match.group(1)
+                }
+        return None
+
+    def has_objects(self) -> bool:
+        return self._check_has_objects(
+            self.header_data, r"\n; printing object")
+
+    def parse_first_layer_height(self) -> Optional[float]:
+        # Check percentage
+        pct = regex_find_float(r"; first_layer_height = (%F)%", self.footer_data)
+        if pct is not None:
+            if self.layer_height is None:
+                # Failed to parse the original layer height, so it is not
+                # possible to calculate a percentage
+                return None
+            return round(pct / 100. * self.layer_height, 6)
+        return regex_find_float(r"; first_layer_height = (%F)", self.footer_data)
+
+    def parse_layer_height(self) -> Optional[float]:
+        self.layer_height = regex_find_float(
+            r"; layer_height = (%F)", self.footer_data
+        )
+        return self.layer_height
+
+    def parse_object_height(self) -> Optional[float]:
+        matches = re.findall(
+            r";BEFORE_LAYER_CHANGE\n(?:.*\n)?;(\d+\.?\d*)", self.footer_data)
+        if matches:
+            try:
+                matches = [float(m) for m in matches]
+            except Exception:
+                pass
+            else:
+                return max(matches)
+        return regex_find_max_float(r"G1\sZ(%F)\sF", self.footer_data)
+
+    def parse_filament_total(self) -> Optional[float]:
+        line = regex_find_string(r'filament\sused\s\[mm\]\s=\s(%S)\n', self.footer_data)
+        if line:
+            filament = regex_find_floats(
+                r"(%F)", line
+            )
+            if filament:
+                return sum(filament)
+        return None
+
+    def parse_filament_weight_total(self) -> Optional[float]:
+        return regex_find_float(
+            r"total\sfilament\sused\s\[g\]\s=\s(%F)",
+            self.footer_data
+        )
+
+    def parse_filament_type(self) -> Optional[str]:
+        return regex_find_string(r";\sfilament_type\s=\s(%S)", self.footer_data)
+
+    def parse_filament_name(self) -> Optional[str]:
+        return regex_find_string(
+            r";\sfilament_settings_id\s=\s(%S)", self.footer_data
+        )
+
+    def parse_estimated_time(self) -> Optional[float]:
+        time_match = re.search(
+            r';\sestimated\sprinting\stime.*', self.footer_data)
+        if not time_match:
+            return None
+        total_time = 0
+        time_group = time_match.group()
+        time_patterns = [(r"(\d+)d", 24*60*60), (r"(\d+)h", 60*60),
+                         (r"(\d+)m", 60), (r"(\d+)s", 1)]
+        try:
+            for pattern, multiplier in time_patterns:
+                t = re.search(pattern, time_group)
+                if t:
+                    total_time += int(t.group(1)) * multiplier
+        except Exception:
+            return None
+        return round(total_time, 2)
+
+    def parse_first_layer_extr_temp(self) -> Optional[float]:
+        return regex_find_float(
+            r"; first_layer_temperature = (%F)", self.footer_data
+        )
+
+    def parse_first_layer_bed_temp(self) -> Optional[float]:
+        return regex_find_float(
+            r"; first_layer_bed_temperature = (%F)", self.footer_data
+        )
+
+    def parse_chamber_temp(self) -> Optional[float]:
+        return regex_find_float(
+            r"; chamber_temperature = (%F)", self.footer_data
+        )
+
+    def parse_nozzle_diameter(self) -> Optional[float]:
+        return regex_find_float(
+            r";\snozzle_diameter\s=\s(%F)", self.footer_data
+        )
+
+    def parse_layer_count(self) -> Optional[int]:
+        return regex_find_int(r"; total layers count = (%D)", self.footer_data)
+
 class Slic3rPE(PrusaSlicer):
     def check_identity(self, data: str) -> Optional[Dict[str, str]]:
         match = re.search(r"Slic3r\sPrusa\sEdition\s(.*)\son", data)
@@ -436,7 +548,7 @@ class Slic3rPE(PrusaSlicer):
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
         return None
-
+    
 class Slic3r(Slic3rPE):
     def check_identity(self, data: str) -> Optional[Dict[str, str]]:
         match = re.search(r"Slic3r\s(\d.*)\son", data)
@@ -923,7 +1035,7 @@ class KiriMoto(BaseSlicer):
 READ_SIZE = 1024 * 1024  # 1 MiB
 SUPPORTED_SLICERS: List[Type[BaseSlicer]] = [
     PrusaSlicer, Slic3rPE, Slic3r, Cura, Simplify3D,
-    KISSlicer, IdeaMaker, IceSL, KiriMoto
+    KISSlicer, IdeaMaker, IceSL, KiriMoto, PantheonSlicer
 ]
 SUPPORTED_DATA = [
     'gcode_start_byte',
@@ -967,6 +1079,8 @@ def process_objects(file_path: str, slicer: BaseSlicer, name: str) -> bool:
                     if slicer.has_m486_objects:
                         processor = preprocess_m486
                     elif isinstance(slicer, PrusaSlicer):
+                        processor = preprocess_slicer
+                    elif isinstance(slicer, PantheonSlicer):
                         processor = preprocess_slicer
                     elif isinstance(slicer, Cura):
                         processor = preprocess_cura
