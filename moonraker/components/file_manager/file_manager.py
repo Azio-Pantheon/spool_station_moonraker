@@ -789,8 +789,7 @@ class FileManager:
         else:
             permissions = "rw"
             if (
-                root not in self.full_access_roots or
-                (path.is_symlink() and path.is_file())
+                root not in self.full_access_roots
             ):
                 permissions = "r"
             for name, (res_path, can_read) in self.reserved_paths.items():
