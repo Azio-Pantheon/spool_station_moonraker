@@ -96,7 +96,7 @@ class AppDeploy(BaseDeploy):
         self.path = pathlib.Path(config.get('path')).expanduser().resolve()
         self._verify_path(config, 'path', self.path, check_file=False)
         if (
-            reserve and self.name not in ["moonraker", "klipper"]
+            reserve and self.name not in ["moonraker", "klipper", "HS3-Config"]
             and not self.path.joinpath(".writeable").is_file()
         ):
             fm: FileManager = self.server.lookup_component("file_manager")

@@ -432,6 +432,8 @@ class StreamingDownload:
             self.dest_file = pathlib.Path(dest_path)
         else:
             self.dest_file = dest_path
+        if self.dest_file.is_symlink():
+            self.dest_file = self.dest_file.readlink()
         self.filename = self.dest_file.name
         self.file_hdl: Optional[BufferedWriter] = None
         self.total_recd: int = 0
