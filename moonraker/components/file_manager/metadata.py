@@ -105,6 +105,15 @@ def regex_find_max_float(pattern: str, data: str) -> Optional[float]:
     return max(result) if result else None
 
 
+def regex_find_yml_string(pattern: str, data: str) -> Optional[str]:
+    match = re.search(pattern, data)
+    if match:
+        return match.group(0).strip('"')
+    return None
+
+
+
+
 # Slicer parsing implementations
 class BaseSlicer(object):
     def __init__(self, file_path: str) -> None:
@@ -204,6 +213,10 @@ class BaseSlicer(object):
 
     def parse_first_layer_extr_temp(self) -> Optional[float]:
         return None
+    
+    def parse_config_yml(self) -> Optional[str]:
+        return None
+    
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
         for data in [self.header_data, self.footer_data]:
@@ -532,6 +545,11 @@ class PantheonSlicer(BaseSlicer):
 
     def parse_layer_count(self) -> Optional[int]:
         return regex_find_int(r"; total layers count = (%D)", self.footer_data)
+    
+    def parse_config_yml(self) -> Optional[str]:
+    # Define the pattern to search for strings starting with "---" and ending with "..."
+        pattern = r"---.*?\.\.\."
+        return regex_find_yml_string(pattern, self.footer_data)
 
 class Slic3rPE(PrusaSlicer):
     def check_identity(self, data: str) -> Optional[Dict[str, str]]:
@@ -1038,6 +1056,7 @@ SUPPORTED_SLICERS: List[Type[BaseSlicer]] = [
     KISSlicer, IdeaMaker, IceSL, KiriMoto, PantheonSlicer
 ]
 SUPPORTED_DATA = [
+    'config_yml',
     'gcode_start_byte',
     'gcode_end_byte',
     'layer_count',
