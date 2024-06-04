@@ -584,12 +584,13 @@ class PantheonSlicer(BaseSlicer):
 
         if config_yml is not None:
             #Load gcode yml config into a yml object
-            gcode_yml_temp = config_yml.replace('---', '').replace('...', '').replace(';', '\n')
+            gcode_yml_temp = config_yml.replace('---', '').replace('...', '').replace(';', '\n').replace('\\n', '')
             try:
                 gcode_yml = yaml.safe_load(gcode_yml_temp)
             except yaml.YAMLError as e: 
                 logging.exception('Incorrect gcode config_yml format detected')
-
+                output = ['Warning! gcode_yml cannot be loaded: invalid format detected']
+                return output
 
             try:
                 checks_passed, output = self.check_config(schema_data, config_data, gcode_yml_temp)
@@ -611,11 +612,11 @@ class PantheonSlicer(BaseSlicer):
         checks_passed = True
 
         # Validate that the header and config both match the schema 
-        #try:
-        #    validate(config, schema)
-        #except ValidationError as e:
-        #    printOutput('Warning! Printer Config does not match schema:\n\t','.'.join(e.absolute_path)+':',e.message)
-        #    checks_passed &= False
+        try:
+            validate(config, schema)
+        except ValidationError as e:
+            printOutput('Warning! Printer Config does not match schema:\n\t','.'.join(e.absolute_path)+':',e.message)
+            checks_passed &= False
 
         try:
             validate(header_data, schema)
