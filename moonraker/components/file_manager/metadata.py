@@ -574,14 +574,6 @@ class PantheonSlicer(BaseSlicer):
         pattern = r"---.*?\.\.\."
         config_yml = regex_find_yml_string(pattern, self.footer_data)
 
-        #Load yml config from printer hardware side 
-        try:
-            with open(printer_config_file_path, 'r') as file:
-                data = yaml.safe_load(file)
-        except yaml.YAMLError as e:
-            logging.exception(e)
-            data = None
-
         if config_yml is not None:
             #Load gcode yml config into a yml object
             gcode_yml_temp = config_yml.replace('---', '').replace('...', '').replace(';', '\n').replace('\\n', '')
@@ -606,8 +598,10 @@ class PantheonSlicer(BaseSlicer):
             output = StringIO()
             print(*args, file=output, end="")
             outputStrings.append(output.getvalue())
-
-        header_data = yaml.safe_load(header)
+        try:
+            header_data = yaml.safe_load(header)
+        except yaml.YAMLError as e: 
+            logging.exception('Incorrect gcode config_yml format detected')
 
         checks_passed = True
 
