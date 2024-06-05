@@ -234,6 +234,9 @@ class BaseSlicer(object):
     def parse_config_verifier(self) -> Optional[str]:
         return None
     
+    def parse_enable_config_verifier(self) -> bool:
+        return os.path.exists(printer_config_file_path)
+
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
         for data in [self.header_data, self.footer_data]:
@@ -585,6 +588,9 @@ class PantheonSlicer(BaseSlicer):
 
         #return config_verifier 
         return output
+    
+    def parse_enable_config_verifier(self) -> bool:
+        return os.path.exists(printer_config_file_path)
     
     def check_config(self, schema, config, header):
         outputStrings = []
@@ -1151,6 +1157,7 @@ SUPPORTED_SLICERS: List[Type[BaseSlicer]] = [
 SUPPORTED_DATA = [
     'config_yml',
     'config_verifier',
+    'enable_config_verifier',
     'gcode_start_byte',
     'gcode_end_byte',
     'layer_count',
