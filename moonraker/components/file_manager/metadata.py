@@ -636,7 +636,7 @@ class PantheonSlicer(BaseSlicer):
         gcode_axes_limits = header_data['printer']['axes-limits']
         for axis in gcode_axes_limits.keys():
             if gcode_axes_limits[axis] > printer_axes_limits[axis]:
-                printOutput( 'Caution!', axis.upper(), 'axis is too small!\n\tExpected', gcode_axes_limits[axis], 'mm got',  printer_axes_limits[axis], "mm")
+                printOutput( 'Caution!', 'Slicer requested', gcode_axes_limits[axis], 'mm', axis.upper(), 'axis, \n\tthe printer has',  printer_axes_limits[axis], "mm", axis.upper(), "axis.")
                 checks_passed &= False
 
         # Compare hardware
@@ -645,11 +645,11 @@ class PantheonSlicer(BaseSlicer):
         for key in gcode_hardware.keys():
             
             if key not in printer_hardware:
-                printOutput('Caution! No suitable', key, 'found!')
+                printOutput('Caution! Slicer requested', key, 'which the printer does not have!')
                 checks_passed &= False
             elif gcode_hardware[key] != 'any':
                 if gcode_hardware[key] != printer_hardware[key]:
-                    printOutput('Caution! Wrong', key, 'found!\n\tExpected', gcode_hardware[key], 'got', printer_hardware[key])
+                    printOutput('Caution! Mismatched', key, 'found! \n\tSlicer requested', gcode_hardware[key], ', the printer has', printer_hardware[key])
                     checks_passed &= False
 
         return checks_passed, outputStrings
