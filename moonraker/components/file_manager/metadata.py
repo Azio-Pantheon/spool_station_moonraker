@@ -577,12 +577,6 @@ class PantheonSlicer(BaseSlicer):
         if config_yml is not None:
             #Load gcode yml config into a yml object
             gcode_yml_temp = config_yml.replace('---', '').replace('...', '').replace(';', '\n').replace('\\n', '')
-            try:
-                gcode_yml = yaml.safe_load(gcode_yml_temp)
-            except yaml.YAMLError as e: 
-                logging.exception('Incorrect gcode config_yml format detected')
-                output = ['Warning! gcode_yml cannot be loaded: invalid format detected']
-                return output
 
             try:
                 checks_passed, output = self.check_config(schema_data, config_data, gcode_yml_temp)
