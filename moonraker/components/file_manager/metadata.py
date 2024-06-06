@@ -19,6 +19,9 @@ import shutil
 import uuid
 import logging
 from PIL import Image
+import yaml
+from io import StringIO
+from jsonschema import validate, ValidationError
 
 # Annotation imports
 from typing import (
@@ -35,6 +38,17 @@ if TYPE_CHECKING:
 
 UFP_MODEL_PATH = "/3D/model.gcode"
 UFP_THUMB_PATH = "/Metadata/thumbnail.png"
+printer_config_file_path = '/home/hs3/printer_data/config/printer-config.yml'
+printer_config__schema_file_path = '/home/hs3/printer_data/config/processor/printer-config-schema.json'
+
+#Load config_schema_yml and printer_config_yml
+try:
+    with open(printer_config__schema_file_path, 'r') as file:
+        schema_data = yaml.safe_load(file)  
+    with open(printer_config_file_path, 'r') as file:
+        config_data = yaml.safe_load(file)  
+except Exception as e:
+    logging.exception(e)
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 logger = logging.getLogger("metadata")
@@ -103,6 +117,15 @@ def regex_find_min_float(pattern: str, data: str) -> Optional[float]:
 def regex_find_max_float(pattern: str, data: str) -> Optional[float]:
     result = regex_find_floats(pattern, data)
     return max(result) if result else None
+
+
+def regex_find_yml_string(pattern: str, data: str) -> Optional[str]:
+    match = re.search(pattern, data)
+    if match:
+        return match.group(0).strip('"')
+    return None
+
+
 
 
 # Slicer parsing implementations
@@ -204,6 +227,16 @@ class BaseSlicer(object):
 
     def parse_first_layer_extr_temp(self) -> Optional[float]:
         return None
+    
+    def parse_config_yml(self) -> Optional[str]:
+        return None
+    
+    def parse_config_verifier(self) -> Optional[str]:
+        return None
+    
+    def parse_enable_config_verifier(self) -> bool:
+        return os.path.exists(printer_config_file_path)
+
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
         for data in [self.header_data, self.footer_data]:
@@ -532,6 +565,90 @@ class PantheonSlicer(BaseSlicer):
 
     def parse_layer_count(self) -> Optional[int]:
         return regex_find_int(r"; total layers count = (%D)", self.footer_data)
+    
+    def parse_config_yml(self) -> Optional[str]:
+    # Define the pattern to search for strings starting with "---" and ending with "..."
+        pattern = r"---.*?\.\.\."
+        return regex_find_yml_string(pattern, self.footer_data)
+
+    def parse_config_verifier(self) -> Optional[str]:
+        output = None
+        #Load yml config from gcode
+        pattern = r"---.*?\.\.\."
+        config_yml = regex_find_yml_string(pattern, self.footer_data)
+
+        if config_yml is not None:
+            #Load gcode yml config into a yml object
+            gcode_yml_temp = config_yml.replace('---', '').replace('...', '').replace(';', '\n').replace('\\n', '')
+
+            try:
+                checks_passed, output = self.check_config(schema_data, config_data, gcode_yml_temp)
+            except Exception as e:
+                logging.exception(e)
+
+        #return config_verifier 
+        return output
+    
+    def parse_enable_config_verifier(self) -> bool:
+        return os.path.exists(printer_config_file_path)
+    
+    def check_config(self, schema, config, header):
+        outputStrings = []
+        def printOutput(*args):
+            output = StringIO()
+            print(*args, file=output, end="")
+            outputStrings.append(output.getvalue())
+        try:
+            header_data = yaml.safe_load(header)
+        except yaml.YAMLError as e: 
+            logging.exception('Incorrect gcode config_yml format detected')
+
+        checks_passed = True
+
+        # Validate that the header and config both match the schema 
+        try:
+            validate(config, schema)
+        except ValidationError as e:
+            printOutput('Warning! Printer Config does not match schema:\n\t','.'.join(e.absolute_path)+':',e.message)
+            checks_passed &= False
+
+        try:
+            validate(header_data, schema)
+        except ValidationError as e:
+            printOutput('Warning! GCode Header does not match schema:\n\t','.'.join(e.absolute_path)+':',e.message)
+            checks_passed &= False
+
+        # Compare processes 
+        printer_process = config['printer']['process']
+        gcode_process = header_data['printer']['process']
+        if gcode_process != printer_process:
+            printOutput('Warning! Process mismatch!\n\tExpected', gcode_process, 'got', printer_process) 
+            checks_passed &= False
+
+        # Compare axes limits
+        printer_axes_limits = config['printer']['axes-limits']
+        gcode_axes_limits = header_data['printer']['axes-limits']
+        for axis in gcode_axes_limits.keys():
+            if gcode_axes_limits[axis] > printer_axes_limits[axis]:
+                printOutput( 'Caution!', 'Slicer requested', gcode_axes_limits[axis], 'mm', axis.upper(), 'axis, \n\tthe printer has',  printer_axes_limits[axis], "mm", axis.upper(), "axis.")
+                checks_passed &= False
+
+        # Compare hardware
+        printer_hardware = config['printer']['hardware']
+        gcode_hardware = header_data['printer']['hardware']
+        for key in gcode_hardware.keys():
+            
+            if key not in printer_hardware:
+                printOutput('Caution! Slicer requested', key, 'which the printer does not have!')
+                checks_passed &= False
+            elif gcode_hardware[key] != 'any':
+                if gcode_hardware[key] != printer_hardware[key]:
+                    printOutput('Caution! Mismatched', key, 'found! \n\tSlicer requested', gcode_hardware[key], ', the printer has', printer_hardware[key])
+                    checks_passed &= False
+
+        return checks_passed, outputStrings
+
+    
 
 class Slic3rPE(PrusaSlicer):
     def check_identity(self, data: str) -> Optional[Dict[str, str]]:
@@ -1038,6 +1155,9 @@ SUPPORTED_SLICERS: List[Type[BaseSlicer]] = [
     KISSlicer, IdeaMaker, IceSL, KiriMoto, PantheonSlicer
 ]
 SUPPORTED_DATA = [
+    'config_yml',
+    'config_verifier',
+    'enable_config_verifier',
     'gcode_start_byte',
     'gcode_end_byte',
     'layer_count',
