@@ -143,7 +143,8 @@ class FileManager:
             transports=TransportType.WEBSOCKET
         )
         self.server.register_endpoint(
-            "/server/files/configgenerate", RequestType.POST, self._handle_configgenerate_request
+            "/server/files/configgenerate", RequestType.POST, self._handle_configgenerate_request,
+            wrap_result=False
         )
         # register client notificaitons
         self.server.register_notification("file_manager:filelist_changed")
@@ -1090,7 +1091,7 @@ class FileManager:
             return self._sched_changed_event("delete_file", root, full_path)
 
     async def _handle_configgenerate_request(self, web_request: WebRequest) -> Dict[str, Any]:
-        requested_path: str = web_request.get_str('path')
+        requested_path = "/home/hs3/printer_data/config/features.yml"
         script_path = "/home/hs3/hs3-data/utilities/config-processor/generate_printer_config.sh"
         working_directory = "/home/hs3/hs3-data/utilities/config-processor"
         try:
@@ -1104,9 +1105,10 @@ class FileManager:
             stdout, stderr = await process.communicate()
             
             if process.returncode != 0:
-                return stdout + stderr.decode()
-            
-            return stdout
+                result = {'error':stdout.decode('utf-8')}
+                return result
+
+            return
 
 
         except Exception as e:
