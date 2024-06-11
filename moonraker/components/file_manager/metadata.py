@@ -38,14 +38,14 @@ if TYPE_CHECKING:
 
 UFP_MODEL_PATH = "/3D/model.gcode"
 UFP_THUMB_PATH = "/Metadata/thumbnail.png"
-printer_config_file_path = '/home/hs3/printer_data/config/printer-config.yml'
-printer_config__schema_file_path = '/home/hs3/printer_data/config/processor/printer-config-schema.json'
+features_file_path = '/home/hs3/hs3-data/config/features.yml'
+printer_config__schema_file_path = '/home/hs3/hs3-data/utilities/config-processor/printer-config-schema.json'
 
 #Load config_schema_yml and printer_config_yml
 try:
     with open(printer_config__schema_file_path, 'r') as file:
         schema_data = yaml.safe_load(file)  
-    with open(printer_config_file_path, 'r') as file:
+    with open(features_file_path, 'r') as file:
         config_data = yaml.safe_load(file)  
 except Exception as e:
     logging.exception(e)
@@ -235,7 +235,7 @@ class BaseSlicer(object):
         return None
     
     def parse_enable_config_verifier(self) -> bool:
-        return os.path.exists(printer_config_file_path)
+        return os.path.exists(features_file_path)
 
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
@@ -590,7 +590,7 @@ class PantheonSlicer(BaseSlicer):
         return output
     
     def parse_enable_config_verifier(self) -> bool:
-        return os.path.exists(printer_config_file_path)
+        return os.path.exists(features_file_path)
     
     def check_config(self, schema, config, header):
         outputStrings = []
