@@ -15,6 +15,7 @@ import asyncio
 import zipfile
 import time
 import math
+import subprocess
 from copy import deepcopy
 from inotify_simple import INotify
 from inotify_simple import flags as iFlags
@@ -140,6 +141,10 @@ class FileManager:
         self.server.register_endpoint(
             "/server/files/delete_file", RequestType.DELETE, self._handle_file_delete,
             transports=TransportType.WEBSOCKET
+        )
+        self.server.register_endpoint(
+            "/server/files/configgenerate", RequestType.POST, self._handle_configgenerate_request,
+            wrap_result=False
         )
         # register client notificaitons
         self.server.register_notification("file_manager:filelist_changed")
@@ -1084,6 +1089,30 @@ class FileManager:
             os.remove(full_path)
             self.fs_observer.on_item_delete(root, full_path)
             return self._sched_changed_event("delete_file", root, full_path)
+
+    async def _handle_configgenerate_request(self, web_request: WebRequest) -> Dict[str, Any]:
+        requested_path = "/home/hs3/printer_data/config/features.yml"
+        script_path = "/home/hs3/hs3-data/utilities/config-processor/generate_printer_config.sh"
+        working_directory = "/home/hs3/hs3-data/utilities/config-processor"
+        try:
+            process = await asyncio.create_subprocess_exec(
+                script_path, requested_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=os.environ,
+                cwd=working_directory
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                result = {'error':stdout.decode('utf-8')}
+                return result
+
+            return
+
+
+        except Exception as e:
+            return e
 
     def _sched_changed_event(
         self,
