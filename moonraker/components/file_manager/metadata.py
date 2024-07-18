@@ -235,7 +235,8 @@ class BaseSlicer(object):
         return None
     
     def parse_enable_config_verifier(self) -> bool:
-        return os.path.exists(features_file_path)
+        #return os.path.exists(features_file_path)
+        return False
 
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
