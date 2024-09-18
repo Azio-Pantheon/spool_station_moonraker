@@ -71,7 +71,7 @@ def getitem_with_default(item: Dict, field: Any) -> Any:
 
 
 class MoonrakerDatabase:
-    def __init__(self, config: ConfigHelper) -> None:
+    def __init__(self, config: ConfigHelper,shared_printer_config) -> None:
         self.server = config.get_server()
         self.eventloop = self.server.get_event_loop()
         self.namespaces: Dict[str, object] = {}
@@ -79,6 +79,9 @@ class MoonrakerDatabase:
         app_args = self.server.get_app_args()
         dep_path = config.get("database_path", None, deprecate=True)
         db_path = pathlib.Path(app_args["data_path"]).joinpath("database")
+
+        self.shared_printer_config = shared_printer_config
+
         if (
             app_args["is_default_data_path"] and
             not db_path.joinpath("data.mdb").exists()
@@ -774,9 +777,16 @@ class MoonrakerDatabase:
                 f"{type(key).__name__}")
         if req_type == RequestType.GET:
             val = await self.get_item(namespace, key)
+            if namespace == 'HS3':
+                self.shared_printer_config.filament = val['filament_type']
+                self.shared_printer_config.nozzle = val['nozzle_size']
         elif req_type == RequestType.POST:
             val = web_request.get("value")
             await self.insert_item(namespace, key, val)
+            if namespace == 'HS3' and key == 'filament_type' :
+                self.shared_printer_config.filament = val
+            if namespace == 'HS3' and key == 'nozzle_size' :
+                self.shared_printer_config.nozzle = val
         elif req_type == RequestType.DELETE:
             val = await self.delete_item(namespace, key, drop_empty_db=True)
 
@@ -952,5 +962,5 @@ class NamespaceWrapper:
                 f"Cannot call method {func_name} while "
                 "the eventloop is running")
 
-def load_component(config: ConfigHelper) -> MoonrakerDatabase:
-    return MoonrakerDatabase(config)
+def load_component(config: ConfigHelper, shared_printer_config) -> MoonrakerDatabase:
+    return MoonrakerDatabase(config, shared_printer_config)

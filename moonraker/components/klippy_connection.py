@@ -62,7 +62,7 @@ UNIX_BUFFER_LIMIT = 20 * 1024 * 1024
 SVC_INFO_KEY = "klippy_connection.service_info"
 
 class KlippyConnection:
-    def __init__(self, config: ConfigHelper) -> None:
+    def __init__(self, config: ConfigHelper, shared_printer_config) -> None:
         self.server = config.get_server()
         self.uds_address = config.getpath(
             "klippy_uds_address", pathlib.Path("/tmp/klippy_uds")
@@ -101,6 +101,8 @@ class KlippyConnection:
         self.register_remote_method(
             'process_status_update', self._process_status_update,
             need_klippy_reg=False)
+        
+        self.shared_printer_config = shared_printer_config
 
     @property
     def klippy_apis(self) -> KlippyAPI:
@@ -537,6 +539,20 @@ class KlippyConnection:
     def _process_status_update(
         self, eventtime: float, status: Dict[str, Dict[str, Any]]
     ) -> None:
+        
+        try: 
+            # Ensure that "toolhead" exists in the status dictionary
+            status.setdefault("toolhead", {})
+
+            # Update the toolhead section with filament and nozzle information
+            status["toolhead"].update({
+                "filament_type": self.shared_printer_config.filament,
+                "nozzle_size": self.shared_printer_config.nozzle
+            })
+
+        except KeyError:
+            logging.error("KeyError: 'temperature_sensor chassis' not found in status")
+
         for field, item in status.items():
             self.subscription_cache.setdefault(field, {}).update(item)
         if 'webhooks' in status:
@@ -812,5 +828,5 @@ class KlippyRequest:
             'params': self.params
         }
 
-def load_component(config: ConfigHelper) -> KlippyConnection:
-    return KlippyConnection(config)
+def load_component(config: ConfigHelper, shared_printer_config) -> KlippyConnection:
+    return KlippyConnection(config, shared_printer_config)
