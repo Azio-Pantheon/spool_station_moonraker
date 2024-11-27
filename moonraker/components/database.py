@@ -780,13 +780,20 @@ class MoonrakerDatabase:
             if namespace == 'HS3':
                 self.shared_printer_config.filament = val['filament_type']
                 self.shared_printer_config.nozzle = val['nozzle_size']
+                self.shared_printer_config.wet_filament_purge = int(val['wet_filament_purge'])
+                self.shared_printer_config.last_print_time = float(val['last_print_time'])       
         elif req_type == RequestType.POST:
             val = web_request.get("value")
             await self.insert_item(namespace, key, val)
-            if namespace == 'HS3' and key == 'filament_type' :
-                self.shared_printer_config.filament = val
-            if namespace == 'HS3' and key == 'nozzle_size' :
-                self.shared_printer_config.nozzle = val
+            if namespace == 'HS3':
+                if key == 'filament_type':
+                    self.shared_printer_config.filament = val
+                elif key == 'nozzle_size':
+                    self.shared_printer_config.nozzle = val
+                elif key == 'wet_filament_purge':
+                    self.shared_printer_config.wet_filament_purge = val
+                elif key == 'last_print_time':
+                    self.shared_printer_config.last_print_time = val
         elif req_type == RequestType.DELETE:
             val = await self.delete_item(namespace, key, drop_empty_db=True)
 

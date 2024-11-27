@@ -7,6 +7,7 @@
 from __future__ import annotations
 from ..utils import Sentinel
 from ..common import WebRequest, APITransport, RequestType
+import time
 
 # Annotation imports
 from typing import (
@@ -39,7 +40,7 @@ OBJ_LIST_ENDPOINT = "objects/list"
 REG_METHOD_ENDPOINT = "register_remote_method"
 
 class KlippyAPI(APITransport):
-    def __init__(self, config: ConfigHelper) -> None:
+    def __init__(self, config: ConfigHelper, shared_printer_config) -> None:
         self.server = config.get_server()
         self.klippy: Klippy = self.server.lookup_component("klippy_connection")
         self.eventloop = self.server.get_event_loop()
@@ -72,6 +73,8 @@ class KlippyAPI(APITransport):
         self.server.register_event_handler(
             "server:klippy_disconnect", self._on_klippy_disconnect
         )
+
+        self.shared_printer_config = shared_printer_config
 
     def _on_klippy_disconnect(self) -> None:
         self.host_subscription.clear()
@@ -116,6 +119,81 @@ class KlippyAPI(APITransport):
                         script: str,
                         default: Any = Sentinel.MISSING
                         ) -> str:
+    # Predefined G-code to run before the main script
+        pre_script = """
+            M83  ; extruder relative mode
+            M104 S280 ;heat hotend   //280 for petg, 300 for nylon
+            M140 S80 ;heat bed
+            SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber TARGET=35 ;set exhaust fan
+            M117 Homing
+            RESPOND TYPE=echo MSG="Homing"
+            G28 ; home
+            M117 Heating Extruder
+            RESPOND TYPE=echo MSG="Heating Extruder"
+            TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp  300 for nylon
+
+            M117 Purging
+            RESPOND TYPE=echo MSG="Purging"
+            M106 S50 ; Turn on the fan at full speed
+            G1 X-10 Y-7 Z1 ;
+            ; Oscillation 1
+            G1 X150 E147.5 F600 ; Move to X150 while extruding
+            G1 X0 E147.5 F600   ; Move back to X0 while extruding
+            ; Oscillation 2
+            G1 X150 E147.5 F600
+            G1 X0 E147.5 F600
+            ; Oscillation 3
+            G1 X150 E147.5 F600
+            G1 X0 E147.5 F600
+            ; Oscillation 4
+            G1 X150 E147.5 F600
+            G1 X0 E147.5 F600
+            ; Oscillation 5
+            G1 X150 E147.5 F600
+            G1 X0 E147.5 F600
+
+            G1 X150 F15000
+            G1 X0 F15000
+
+            M117 End Purge Macro
+            RESPOND TYPE=echo MSG="End Purge Macro"
+            M104 S0 ; turn off extruder
+            M140 S0 ; turn off bed
+            M107 ; turn off fan
+            G90; set absolute
+            G1 X1 Y1
+            M106 P1 S0;
+            M106 P0 S0;
+            SET_GCODE_OFFSET Z=0
+            """ 
+
+        # Example timestamp (e.g., when the last job ended)
+        last_job_end_time = self.shared_printer_config.last_print_time
+        
+
+        # Get the current time
+        current_time = time.time()
+
+        # Calculate the elapsed time in seconds
+        elapsed_time_seconds = current_time - last_job_end_time
+
+        # Convert seconds to hours
+        elapsed_hours = elapsed_time_seconds / 3600
+
+        print(f"Hours passed: {elapsed_hours:.2f}")
+
+        if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12:
+            test_pre_script = """
+                M117 Test
+                RESPOND TYPE=echo MSG="Test"
+                M104 S111 ;heat hotend   //280 for petg, 300 for nylon
+                G4 P10000
+                M140 S11 ;heat bed
+                M118 dfajaklsdfj
+                TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp  300 for nylon
+                """
+            await self._send_klippy_request(GCODE_ENDPOINT, {'script': pre_script}, default)
+
         params = {'script': script}
         result = await self._send_klippy_request(
             GCODE_ENDPOINT, params, default)
@@ -283,5 +361,5 @@ class KlippyAPI(APITransport):
             self.eventloop.register_callback(cb, status, eventtime)
         self.server.send_event("server:status_update", status)
 
-def load_component(config: ConfigHelper) -> KlippyAPI:
-    return KlippyAPI(config)
+def load_component(config: ConfigHelper, shared_printer_config) -> KlippyAPI:
+    return KlippyAPI(config, shared_printer_config)

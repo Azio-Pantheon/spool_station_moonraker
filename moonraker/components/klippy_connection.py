@@ -547,7 +547,9 @@ class KlippyConnection:
             # Update the toolhead section with filament and nozzle information
             status["toolhead"].update({
                 "filament_type": self.shared_printer_config.filament,
-                "nozzle_size": self.shared_printer_config.nozzle
+                "nozzle_size": self.shared_printer_config.nozzle,
+                "wet_filament_purge": self.shared_printer_config.wet_filament_purge,
+                "last_print_time": self.shared_printer_config.last_print_time
             })
 
         except KeyError:
