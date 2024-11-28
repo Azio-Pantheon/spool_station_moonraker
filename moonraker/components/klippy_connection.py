@@ -606,7 +606,7 @@ class KlippyConnection:
             await database.insert_item(
                 namespace="HS3",
                 key="last_print_time",
-                val=last_print_time
+                value=last_print_time
             )
         except Exception as e:
             print(f"Failed to insert last_print_time: {e}")
