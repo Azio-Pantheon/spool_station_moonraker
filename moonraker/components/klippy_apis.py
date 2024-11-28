@@ -136,37 +136,30 @@ class KlippyAPI(APITransport):
             M140 S80 ;heat bed
             SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber TARGET=35 ;set exhaust fan
             M117 Homing
-            RESPOND TYPE=echo MSG="Homing"
             G28 ; home
             M117 Heating Extruder
-            RESPOND TYPE=echo MSG="Heating Extruder"
-            TEMPERATURE_WAIT SENSOR="extruder" MINIMUM={hotend_temp} ; wait for the extruder to get to temp
+            TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp
 
-            M117 Purging Wet Filament
-            RESPOND TYPE=echo MSG="Purging"
-            M106 S50 ; Turn on the fan at full speed
+            M117 Purging
             G1 X-10 Y-7 Z1 ;
             ; Oscillation 1
-            G1 X150 E147.5 F600 ; Move to X150 while extruding
-            G1 X0 E147.5 F600   ; Move back to X0 while extruding
+            G1 X300 E150 F600 ; Move to X150 while extruding
+            G1 X0 E150 F600   ; Move back to X0 while extruding
             ; Oscillation 2
-            G1 X150 E147.5 F600
-            G1 X0 E147.5 F600
+            G1 X300 E150 F600
+            G1 X0 E150 F600
             ; Oscillation 3
-            G1 X150 E147.5 F600
-            G1 X0 E147.5 F600
+            G1 X300 E150 F600
+            G1 X0 E150 F600
             ; Oscillation 4
-            G1 X150 E147.5 F600
-            G1 X0 E147.5 F600
-            ; Oscillation 5
-            G1 X150 E147.5 F600
-            G1 X0 E147.5 F600
+            G1 X300 E150 F600
+            G1 X0 E150 F600
+            G1 X-10 Y-7 Z1 ;
 
-            G1 X150 F15000
+            G1 X300 F15000
             G1 X0 F15000
 
             M117 End Purge Macro
-            RESPOND TYPE=echo MSG="End Purge Macro"
             M104 S0 ; turn off extruder
             M140 S0 ; turn off bed
             M107 ; turn off fan
