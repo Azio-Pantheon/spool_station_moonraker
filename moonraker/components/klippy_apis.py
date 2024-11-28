@@ -119,10 +119,20 @@ class KlippyAPI(APITransport):
                         script: str,
                         default: Any = Sentinel.MISSING
                         ) -> str:
-    # Predefined G-code to run before the main script
+
+        # Check the filament type and configure the appropriate pre_script
+        filament = self.shared_printer_config.filament
+        targeted_filament = False
+        if filament == "PETG-CF":
+            hotend_temp = 280
+            targeted_filament = True
+        elif filament in ["PA-CF", "PA-GF"]:
+            hotend_temp = 300
+            targeted_filament = True
+        # Predefined G-code to run before the main script
         pre_script = """
             M83  ; extruder relative mode
-            M104 S280 ;heat hotend   //280 for petg, 300 for nylon
+            M104 S{hotend_temp} ;heat hotend to {hotend_temp} for {filament}
             M140 S80 ;heat bed
             SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber TARGET=35 ;set exhaust fan
             M117 Homing
@@ -130,9 +140,9 @@ class KlippyAPI(APITransport):
             G28 ; home
             M117 Heating Extruder
             RESPOND TYPE=echo MSG="Heating Extruder"
-            TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp  300 for nylon
+            TEMPERATURE_WAIT SENSOR="extruder" MINIMUM={hotend_temp} ; wait for the extruder to get to temp
 
-            M117 Purging
+            M117 Purging Wet Filament
             RESPOND TYPE=echo MSG="Purging"
             M106 S50 ; Turn on the fan at full speed
             G1 X-10 Y-7 Z1 ;
@@ -182,16 +192,10 @@ class KlippyAPI(APITransport):
 
         print(f"Hours passed: {elapsed_hours:.2f}")
 
-        if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12:
-            test_pre_script = """
-                M117 Test
-                RESPOND TYPE=echo MSG="Test"
-                M104 S111 ;heat hotend   //280 for petg, 300 for nylon
-                G4 P10000
-                M140 S11 ;heat bed
-                M118 dfajaklsdfj
-                TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp  300 for nylon
-                """
+        if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12 and targeted_filament:
+            # Substitute variables into the template
+            pre_script = pre_script.format(hotend_temp=hotend_temp, filament=filament)
+
             await self._send_klippy_request(GCODE_ENDPOINT, {'script': pre_script}, default)
 
         params = {'script': script}

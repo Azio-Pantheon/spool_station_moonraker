@@ -103,6 +103,7 @@ class KlippyConnection:
             need_klippy_reg=False)
         
         self.shared_printer_config = shared_printer_config
+        self.previous_state = None  # To track the last known state
 
     @property
     def klippy_apis(self) -> KlippyAPI:
@@ -540,6 +541,22 @@ class KlippyConnection:
         self, eventtime: float, status: Dict[str, Dict[str, Any]]
     ) -> None:
         
+        # tracking the time for last print job
+        if "print_stats" in status and "state" in status["print_stats"]:
+            current_state = status["print_stats"]["state"]
+            # If the state changes from "printing" to "complete", log the time
+            if self.previous_state == "printing" and current_state == "complete":
+                self.shared_printer_config.last_print_time = time.time()
+                database = self.server.lookup_component('database')
+                asyncio.create_task(database.insert_item(
+                    namespace="HS3",
+                    key="last_print_time",
+                    val=self.shared_printer_config.last_print_time
+                ))
+                print(f"State changed from 'printing' to 'complete' at {self.shared_printer_config.last_print_time}")
+            # Update the previous state
+            self.previous_state = current_state
+
         try: 
             # Ensure that "toolhead" exists in the status dictionary
             status.setdefault("toolhead", {})
