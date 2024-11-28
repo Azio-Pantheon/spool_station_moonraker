@@ -548,11 +548,8 @@ class KlippyConnection:
             if self.previous_state == "printing" and current_state == "complete":
                 self.shared_printer_config.last_print_time = time.time()
                 database = self.server.lookup_component('database')
-                asyncio.create_task(database.insert_item(
-                    namespace="HS3",
-                    key="last_print_time",
-                    val=self.shared_printer_config.last_print_time
-                ))
+                asyncio.create_task(self._async_insert_last_print_time(database, self.shared_printer_config.last_print_time))
+
                 print(f"State changed from 'printing' to 'complete' at {self.shared_printer_config.last_print_time}")
             # Update the previous state
             self.previous_state = current_state
@@ -603,6 +600,16 @@ class KlippyConnection:
                     if val:
                         conn_status[name] = val
             conn.send_status(conn_status, eventtime)
+
+    async def _async_insert_last_print_time(self, database, last_print_time: float) -> None:
+        try:
+            await database.insert_item(
+                namespace="HS3",
+                key="last_print_time",
+                val=last_print_time
+            )
+        except Exception as e:
+            print(f"Failed to insert last_print_time: {e}")
 
     async def request(self, web_request: WebRequest) -> Any:
         if not self.is_connected():
