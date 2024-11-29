@@ -117,83 +117,84 @@ class KlippyAPI(APITransport):
 
     async def run_gcode(self,
                         script: str,
-                        default: Any = Sentinel.MISSING
+                        default: Any = Sentinel.MISSING,
+                        from_start_print: bool = False
                         ) -> str:
+        if from_start_print == True:
+            # Check the filament type and configure the appropriate pre_script
+            filament = self.shared_printer_config.filament
+            targeted_filament = False
+            if filament == "PETG-CF":
+                hotend_temp = 280
+                targeted_filament = True
+            elif filament in ["PA-CF", "PA-GF"]:
+                hotend_temp = 300
+                targeted_filament = True
+            # Predefined G-code to run before the main script
+            pre_script = """
+                M83  ; extruder relative mode
+                M104 S{hotend_temp} ;heat hotend to {hotend_temp} for {filament}
+                M140 S80 ;heat bed
+                SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber TARGET=35 ;set exhaust fan
+                M117 Homing
+                RESPOND TYPE=echo MSG="Homing"
+                G28 ; home
+                M117 Heating Extruder
+                RESPOND TYPE=echo MSG="Heating Extruder"
+                TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp
 
-        # Check the filament type and configure the appropriate pre_script
-        filament = self.shared_printer_config.filament
-        targeted_filament = False
-        if filament == "PETG-CF":
-            hotend_temp = 280
-            targeted_filament = True
-        elif filament in ["PA-CF", "PA-GF"]:
-            hotend_temp = 300
-            targeted_filament = True
-        # Predefined G-code to run before the main script
-        pre_script = """
-            M83  ; extruder relative mode
-            M104 S{hotend_temp} ;heat hotend to {hotend_temp} for {filament}
-            M140 S80 ;heat bed
-            SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber TARGET=35 ;set exhaust fan
-            M117 Homing
-            RESPOND TYPE=echo MSG="Homing"
-            G28 ; home
-            M117 Heating Extruder
-            RESPOND TYPE=echo MSG="Heating Extruder"
-            TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp
+                M117 Purging
+                RESPOND TYPE=echo MSG="Purging"
+                G1 X-10 Y-7 Z1 ;
+                ; Oscillation 1
+                G1 X300 E150 F600 ; Move to X150 while extruding
+                G1 X0 E150 F600   ; Move back to X0 while extruding
+                ; Oscillation 2
+                G1 X300 E150 F600
+                G1 X0 E150 F600
+                ; Oscillation 3
+                G1 X300 E150 F600
+                G1 X0 E150 F600
+                ; Oscillation 4
+                G1 X300 E150 F600
+                G1 X0 E150 F600
+                G1 X-10 Y-7 Z1 ;
 
-            M117 Purging
-            RESPOND TYPE=echo MSG="Purging"
-            G1 X-10 Y-7 Z1 ;
-            ; Oscillation 1
-            G1 X300 E150 F600 ; Move to X150 while extruding
-            G1 X0 E150 F600   ; Move back to X0 while extruding
-            ; Oscillation 2
-            G1 X300 E150 F600
-            G1 X0 E150 F600
-            ; Oscillation 3
-            G1 X300 E150 F600
-            G1 X0 E150 F600
-            ; Oscillation 4
-            G1 X300 E150 F600
-            G1 X0 E150 F600
-            G1 X-10 Y-7 Z1 ;
+                G1 X300 F15000
+                G1 X0 F15000
 
-            G1 X300 F15000
-            G1 X0 F15000
+                M117 End Purge Macro
+                RESPOND TYPE=echo MSG="Purge Macro"
+                M104 S0 ; turn off extruder
+                M140 S0 ; turn off bed
+                M107 ; turn off fan
+                G90; set absolute
+                G1 X1 Y1
+                M106 P1 S0;
+                M106 P0 S0;
+                SET_GCODE_OFFSET Z=0
+                """ 
 
-            M117 End Purge Macro
-            RESPOND TYPE=echo MSG="Purge Macro"
-            M104 S0 ; turn off extruder
-            M140 S0 ; turn off bed
-            M107 ; turn off fan
-            G90; set absolute
-            G1 X1 Y1
-            M106 P1 S0;
-            M106 P0 S0;
-            SET_GCODE_OFFSET Z=0
-            """ 
+            # Example timestamp (e.g., when the last job ended)
+            last_job_end_time = self.shared_printer_config.last_print_time
+            
 
-        # Example timestamp (e.g., when the last job ended)
-        last_job_end_time = self.shared_printer_config.last_print_time
-        
+            # Get the current time
+            current_time = time.time()
 
-        # Get the current time
-        current_time = time.time()
+            # Calculate the elapsed time in seconds
+            elapsed_time_seconds = current_time - last_job_end_time
 
-        # Calculate the elapsed time in seconds
-        elapsed_time_seconds = current_time - last_job_end_time
+            # Convert seconds to hours
+            elapsed_hours = elapsed_time_seconds / 3600
 
-        # Convert seconds to hours
-        elapsed_hours = elapsed_time_seconds / 3600
+            print(f"Hours passed: {elapsed_hours:.2f}")
 
-        print(f"Hours passed: {elapsed_hours:.2f}")
+            if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12 and targeted_filament:
+                # Substitute variables into the template
+                pre_script = pre_script.format(hotend_temp=hotend_temp, filament=filament)
 
-        if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12 and targeted_filament:
-            # Substitute variables into the template
-            pre_script = pre_script.format(hotend_temp=hotend_temp, filament=filament)
-
-            await self._send_klippy_request(GCODE_ENDPOINT, {'script': pre_script}, default)
+                await self._send_klippy_request(GCODE_ENDPOINT, {'script': pre_script}, default)
 
         params = {'script': script}
         result = await self._send_klippy_request(
@@ -216,7 +217,7 @@ class KlippyAPI(APITransport):
         script = f'SDCARD_PRINT_FILE FILENAME="{filename}"'
         if wait_klippy_started:
             await self.klippy.wait_started()
-        return await self.run_gcode(script)
+        return await self.run_gcode(script, Any, True)
 
     async def pause_print(
         self, default: Union[Sentinel, _T] = Sentinel.MISSING
