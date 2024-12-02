@@ -8,6 +8,8 @@ from __future__ import annotations
 from ..utils import Sentinel
 from ..common import WebRequest, APITransport, RequestType
 import time
+import asyncio
+
 
 # Annotation imports
 from typing import (
@@ -195,11 +197,25 @@ class KlippyAPI(APITransport):
                 pre_script = pre_script.format(hotend_temp=hotend_temp, filament=filament)
 
                 await self._send_klippy_request(GCODE_ENDPOINT, {'script': pre_script}, default)
+                self.shared_printer_config.last_print_time = time.time()
+                database = self.server.lookup_component('database')
+                asyncio.create_task(self._async_insert_last_print_time(database, self.shared_printer_config.last_print_time))
+
 
         params = {'script': script}
         result = await self._send_klippy_request(
             GCODE_ENDPOINT, params, default)
         return result
+    
+    async def _async_insert_last_print_time(self, database, last_print_time: float) -> None:
+        try:
+            await database.insert_item(
+                namespace="HS3",
+                key="last_print_time",
+                value=last_print_time
+            )
+        except Exception as e:
+            print(f"Failed to insert last_print_time: {e}")
 
     async def start_print(
         self, filename: str, wait_klippy_started: bool = False
