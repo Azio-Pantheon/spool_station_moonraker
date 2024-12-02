@@ -138,15 +138,15 @@ class KlippyAPI(APITransport):
                 M104 S{hotend_temp} ;heat hotend to {hotend_temp} for {filament}
                 M140 S80 ;heat bed
                 SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber TARGET=35 ;set exhaust fan
-                M117 Wet_Filament_Purge: Homing (Print will start after the purge)
-                RESPOND TYPE=echo MSG="Wet_Filament_Purge: Homing (Print will start after the purge)"
+                M117 Wet Filament Purge: Homing (Print will start after the purge)
+                RESPOND TYPE=echo MSG="Wet Filament Purge: Homing (Print will start after the purge)"
                 G28 ; home
-                M117 Wet_Filament_Purge: Heating Extruder (Print will start after the purge)
+                M117 Wet Filament Purge: Heating Extruder (Print will start after the purge)
                 RESPOND TYPE=echo MSG="et_Filament_Purge: Heating Extruder (Print will start after the purge)"
                 TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp
 
-                M117 Wet_Filament_Purge: Purging (Print will start after the purge)
-                RESPOND TYPE=echo MSG="Wet_Filament_Purge: Purging (Print will start after the purge)"
+                M117 Wet Filament Purge: Purging (Print will start after the purge)
+                RESPOND TYPE=echo MSG="Wet Filament Purge: Purging (Print will start after the purge)"
                 G1 X-10 Y-7 Z1 ;
                 ; Oscillation 1
                 G1 X300 E150 F600 ; Move to X150 while extruding
@@ -165,8 +165,8 @@ class KlippyAPI(APITransport):
                 G1 X300 F15000
                 G1 X0 F15000
 
-                M117 Wet_Filament_Purge: End Purge Macro (Print will start after the purge)
-                RESPOND TYPE=echo MSG="Wet_Filament_Purge: Purge Macro (Print will start after the purge)"
+                M117 Wet Filament Purge: End Purge Macro (Print will start after the purge)
+                RESPOND TYPE=echo MSG="Wet Filament Purge: End Purge Macro (Print will start after the purge)"
                 M104 S0 ; turn off extruder
                 M140 S0 ; turn off bed
                 M107 ; turn off fan
@@ -192,7 +192,7 @@ class KlippyAPI(APITransport):
 
             print(f"Hours passed: {elapsed_hours:.2f}")
 
-            if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12 and targeted_filament:
+            if self.shared_printer_config.Wet Filament Purge == 1 and elapsed_hours > 12 and targeted_filament:
                 # Substitute variables into the template
                 pre_script = pre_script.format(hotend_temp=hotend_temp, filament=filament)
 
