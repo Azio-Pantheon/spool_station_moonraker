@@ -192,7 +192,7 @@ class KlippyAPI(APITransport):
 
             print(f"Hours passed: {elapsed_hours:.2f}")
 
-            if self.shared_printer_config.Wet Filament Purge == 1 and elapsed_hours > 12 and targeted_filament:
+            if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12 and targeted_filament:
                 # Substitute variables into the template
                 pre_script = pre_script.format(hotend_temp=hotend_temp, filament=filament)
 
