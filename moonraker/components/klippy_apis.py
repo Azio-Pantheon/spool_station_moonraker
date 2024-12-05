@@ -142,7 +142,7 @@ class KlippyAPI(APITransport):
                 RESPOND TYPE=echo MSG="Wet Filament Purge: Homing (Print will start after the purge)"
                 G28 ; home
                 M117 Wet Filament Purge: Heating Extruder (Print will start after the purge)
-                RESPOND TYPE=echo MSG="et_Filament_Purge: Heating Extruder (Print will start after the purge)"
+                RESPOND TYPE=echo MSG="Wet Filament Purge: Heating Extruder (Print will start after the purge)"
                 TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp
 
                 M117 Wet Filament Purge: Purging (Print will start after the purge)
