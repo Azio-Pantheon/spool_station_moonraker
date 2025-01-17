@@ -65,6 +65,12 @@ CORE_COMPONENTS = [
     'announcements', 'webcam', 'extensions'
 ]
 
+class SharedPrinterConfig:
+    def __init__(self, filament='PETG-CF', nozzle='0.4', wet_filament_purge=1, last_print_time=0):
+        self.filament = filament
+        self.nozzle = nozzle
+        self.wet_filament_purge = int(wet_filament_purge)
+        self.last_print_time = float(last_print_time)
 
 class Server:
     error = ServerError
@@ -91,6 +97,9 @@ class Server:
         self.server_running: bool = False
         self.pip_recovery_attempted: bool = False
 
+        self.shared_printer_config = SharedPrinterConfig()
+
+
         # Configure Debug Logging
         config.getboolean('enable_debug_logging', False, deprecate=True)
         self.debug = args["debug"]
@@ -98,7 +107,7 @@ class Server:
         logging.getLogger().setLevel(log_level)
         self.event_loop.set_debug(args["asyncio_debug"])
         self.klippy_connection: KlippyConnection
-        self.klippy_connection = self.load_component(config, "klippy_connection")
+        self.klippy_connection = self.load_component_shared_config(config, self.shared_printer_config, "klippy_connection")
 
         # Tornado Application/Server
         self.moonraker_app: MoonrakerApp = self.load_component(config, "application")
@@ -258,7 +267,13 @@ class Server:
 
         # load core components
         for component in CORE_COMPONENTS:
-            self.load_component(config, component)
+            if component == 'database':
+                self.load_component_shared_config(config, self.shared_printer_config, component)
+                #self.database = self.components.get('database')
+            elif component == 'klippy_apis':
+                self.load_component_shared_config(config, self.shared_printer_config, component)
+            else:
+                self.load_component(config, component)
             if component in cfg_sections:
                 cfg_sections.remove(component)
 
@@ -309,6 +324,94 @@ class Server:
             return default
         self.components[component_name] = component
         logging.info(f"Component ({component_name}) loaded")
+        return component
+    
+    def load_component_shared_config(
+        self,
+        config: confighelper.ConfigHelper,
+        shared_printer_config: SharedPrinterConfig,
+        component_name: str,
+        default: _T = Sentinel.MISSING
+    ) -> Union[_T, Any]:
+        if component_name in self.components:
+            return self.components[component_name]
+        if self.is_configured():
+            raise self.error(
+                "Cannot load components after configuration", 500
+            )
+        if component_name in self.failed_components:
+            raise self.error(
+                f"Component {component_name} previously failed to load", 500
+            )
+        try:
+            full_name = f"moonraker.components.{component_name}"
+            module = importlib.import_module(full_name)
+            # Server components use the [server] section for configuration
+            if component_name not in SERVER_COMPONENTS:
+                is_core = component_name in CORE_COMPONENTS
+                fallback: Optional[str] = "server" if is_core else None
+                config = config.getsection(component_name, fallback)
+            load_func = getattr(module, "load_component")
+            component = load_func(config, shared_printer_config)
+        except Exception as e:
+            ucomps: List[str] = self.app_args.get("unofficial_components", [])
+            if isinstance(e, ModuleNotFoundError) and component_name not in ucomps:
+                if self.try_pip_recovery(e.name or "unknown"):
+                    return self.load_component(config, component_name, default)
+            msg = f"Unable to load component: ({component_name})"
+            logging.exception(msg)
+            if component_name not in self.failed_components:
+                self.failed_components.append(component_name)
+            if default is Sentinel.MISSING:
+                raise
+            return default
+        self.components[component_name] = component
+        logging.info(f"Component ({component_name}) loaded")
+
+        return component
+    
+    def load_component_shared_database(
+        self,
+        config: confighelper.ConfigHelper,
+        shared_database: Any,
+        component_name: str,
+        default: _T = Sentinel.MISSING
+    ) -> Union[_T, Any]:
+        if component_name in self.components:
+            return self.components[component_name]
+        if self.is_configured():
+            raise self.error(
+                "Cannot load components after configuration", 500
+            )
+        if component_name in self.failed_components:
+            raise self.error(
+                f"Component {component_name} previously failed to load", 500
+            )
+        try:
+            full_name = f"moonraker.components.{component_name}"
+            module = importlib.import_module(full_name)
+            # Server components use the [server] section for configuration
+            if component_name not in SERVER_COMPONENTS:
+                is_core = component_name in CORE_COMPONENTS
+                fallback: Optional[str] = "server" if is_core else None
+                config = config.getsection(component_name, fallback)
+            load_func = getattr(module, "load_component")
+            component = load_func(config, shared_database)
+        except Exception as e:
+            ucomps: List[str] = self.app_args.get("unofficial_components", [])
+            if isinstance(e, ModuleNotFoundError) and component_name not in ucomps:
+                if self.try_pip_recovery(e.name or "unknown"):
+                    return self.load_component(config, component_name, default)
+            msg = f"Unable to load component: ({component_name})"
+            logging.exception(msg)
+            if component_name not in self.failed_components:
+                self.failed_components.append(component_name)
+            if default is Sentinel.MISSING:
+                raise
+            return default
+        self.components[component_name] = component
+        logging.info(f"Component ({component_name}) loaded")
+
         return component
 
     def try_pip_recovery(self, missing_module: str) -> bool:
