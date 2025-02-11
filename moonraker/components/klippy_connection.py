@@ -566,6 +566,16 @@ class KlippyConnection:
                 "last_print_time": self.shared_printer_config.last_print_time
             })
 
+            # Ensure that "toolhead" exists in the status dictionary
+            status.setdefault("test_state", {})
+
+            # Update the toolhead section with filament and nozzle information
+            status["machine_state"].update({
+                "is_purging": self.shared_printer_config.is_purging,
+                "enable_prime": self.shared_printer_config.enable_prime
+            })
+
+
         except KeyError:
             logging.error("KeyError: 'temperature_sensor chassis' not found in status")
 
