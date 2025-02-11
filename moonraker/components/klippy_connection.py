@@ -567,7 +567,7 @@ class KlippyConnection:
             })
 
             # Ensure that "toolhead" exists in the status dictionary
-            status.setdefault("test_state", {})
+            status.setdefault("machine_state", {})
 
             # Update the toolhead section with filament and nozzle information
             status["machine_state"].update({

@@ -787,9 +787,9 @@ class MoonrakerDatabase:
                 if 'last_print_time' in val:
                     self.shared_printer_config.last_print_time = float(val['last_print_time'])   
                 if 'is_purging' in val:
-                    self.shared_printer_config.last_print_time = float(val['is_purging']) 
+                    self.shared_printer_config.is_purging = int(val['is_purging']) 
                 if 'enable_prime' in val:
-                    self.shared_printer_config.last_print_time = float(val['enable_prime'])     
+                    self.shared_printer_config.enable_prime = int(val['enable_prime'])     
         elif req_type == RequestType.POST:
             val = web_request.get("value")
             await self.insert_item(namespace, key, val)
@@ -799,13 +799,13 @@ class MoonrakerDatabase:
                 elif key == 'nozzle_size':
                     self.shared_printer_config.nozzle = val
                 elif key == 'wet_filament_purge':
-                    self.shared_printer_config.wet_filament_purge = val
+                    self.shared_printer_config.wet_filament_purge = int(val)
                 elif key == 'last_print_time':
-                    self.shared_printer_config.last_print_time = val
+                    self.shared_printer_config.last_print_time = float(val) 
                 elif key == 'is_purging':
-                    self.shared_printer_config.is_purging = val
+                    self.shared_printer_config.is_purging = int(val)
                 elif key == 'enable_prime':
-                    self.shared_printer_config.enable_prime = val
+                    self.shared_printer_config.enable_prime = int(val)
         elif req_type == RequestType.DELETE:
             val = await self.delete_item(namespace, key, drop_empty_db=True)
 
