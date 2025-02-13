@@ -66,11 +66,13 @@ CORE_COMPONENTS = [
 ]
 
 class SharedPrinterConfig:
-    def __init__(self, filament='PETG-CF', nozzle='0.4', wet_filament_purge=1, last_print_time=0):
+    def __init__(self, filament='PETG-CF', nozzle='0.4', wet_filament_purge=1, last_print_time=0,is_purging=0,enable_prime=1):
         self.filament = filament
         self.nozzle = nozzle
         self.wet_filament_purge = int(wet_filament_purge)
         self.last_print_time = float(last_print_time)
+        self.is_purging = int(is_purging)
+        self.enable_prime = int(enable_prime)
 
 class Server:
     error = ServerError

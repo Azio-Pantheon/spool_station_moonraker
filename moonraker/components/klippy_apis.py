@@ -195,10 +195,11 @@ class KlippyAPI(APITransport):
             if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12 and targeted_filament:
                 # Substitute variables into the template
                 pre_script = pre_script.format(hotend_temp=hotend_temp, filament=filament)
-
-                await self._send_klippy_request(GCODE_ENDPOINT, {'script': pre_script}, default)
+                self.shared_printer_config.is_purging = 1
                 self.shared_printer_config.last_print_time = time.time()
                 database = self.server.lookup_component('database')
+                await self._send_klippy_request(GCODE_ENDPOINT, {'script': pre_script}, default)
+                self.shared_printer_config.is_purging = 0
                 asyncio.create_task(self._async_insert_last_print_time(database, self.shared_printer_config.last_print_time))
 
 
