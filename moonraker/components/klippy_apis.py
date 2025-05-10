@@ -132,50 +132,6 @@ class KlippyAPI(APITransport):
             elif filament in ["PA-CF", "PA-GF"]:
                 hotend_temp = 300
                 targeted_filament = True
-            # Predefined G-code to run before the main script
-            pre_script = """
-                M83  ; extruder relative mode
-                M104 S{hotend_temp} ;heat hotend to {hotend_temp} for {filament}
-                M140 S80 ;heat bed
-                SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber TARGET=35 ;set exhaust fan
-                M117 Wet Filament Purge: Homing (Print will start after the purge)
-                RESPOND TYPE=echo MSG="Wet Filament Purge: Homing (Print will start after the purge)"
-                G28 ; home
-                M117 Wet Filament Purge: Heating Extruder (Print will start after the purge)
-                RESPOND TYPE=echo MSG="Wet Filament Purge: Heating Extruder (Print will start after the purge)"
-                TEMPERATURE_WAIT SENSOR="extruder" MINIMUM=280 ; wait for the extruder to get to temp
-
-                M117 Wet Filament Purge: Purging (Print will start after the purge)
-                RESPOND TYPE=echo MSG="Wet Filament Purge: Purging (Print will start after the purge)"
-                G1 X-10 Y-7 Z1 ;
-                ; Oscillation 1
-                G1 X300 E150 F600 ; Move to X150 while extruding
-                G1 X0 E150 F600   ; Move back to X0 while extruding
-                ; Oscillation 2
-                G1 X300 E150 F600
-                G1 X0 E150 F600
-                ; Oscillation 3
-                G1 X300 E150 F600
-                G1 X0 E150 F600
-                ; Oscillation 4
-                G1 X300 E150 F600
-                G1 X0 E150 F600
-                G1 X-10 Y-7 Z1 ;
-
-                G1 X300 F15000
-                G1 X0 F15000
-
-                M117 Wet Filament Purge: End Purge Macro (Print will start after the purge)
-                RESPOND TYPE=echo MSG="Wet Filament Purge: End Purge Macro (Print will start after the purge)"
-                M104 S0 ; turn off extruder
-                M140 S0 ; turn off bed
-                M107 ; turn off fan
-                G90; set absolute
-                G1 X1 Y1
-                M106 P1 S0;
-                M106 P0 S0;
-                SET_GCODE_OFFSET Z=0
-                """ 
 
             # Example timestamp (e.g., when the last job ended)
             last_job_end_time = self.shared_printer_config.last_print_time
@@ -194,11 +150,11 @@ class KlippyAPI(APITransport):
 
             if self.shared_printer_config.wet_filament_purge == 1 and elapsed_hours > 12 and targeted_filament:
                 # Substitute variables into the template
-                pre_script = pre_script.format(hotend_temp=hotend_temp, filament=filament)
+                macro_script = f'WET_FILAMENT_PURGE HOTEND_TEMP={hotend_temp}'
                 self.shared_printer_config.is_purging = 1
                 self.shared_printer_config.last_print_time = time.time()
                 database = self.server.lookup_component('database')
-                await self._send_klippy_request(GCODE_ENDPOINT, {'script': pre_script}, default)
+                await self._send_klippy_request(GCODE_ENDPOINT, {'script': macro_script}, default)
                 self.shared_printer_config.is_purging = 0
                 asyncio.create_task(self._async_insert_last_print_time(database, self.shared_printer_config.last_print_time))
 
