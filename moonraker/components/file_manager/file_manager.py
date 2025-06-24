@@ -2512,6 +2512,10 @@ class MetadataStorage:
                        fname: str,
                        path_info: Dict[str, Any]
                        ) -> asyncio.Event:
+        if fname.startswith("flash_drive/"):
+            mevt = asyncio.Event()
+            mevt.set()
+            return mevt
         if fname in self.pending_requests:
             return self.pending_requests[fname][1]
         mevt = asyncio.Event()
