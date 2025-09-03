@@ -59,7 +59,7 @@ class SpoolTracker:
         self.custom_filaments: Dict[str, Dict[str, Any]] = {}
         
         # Filament state (in-memory for now)
-        self.current_filament_type = config.get("default_filament", "PLA")
+        self.current_filament_type = config.get("default_filament", "PETG-CF")
         self.initial_weight = config.getfloat("initial_weight", 1000.0)  # grams
         self.used_weight = 0.0  # grams
         self.first_used: Optional[datetime] = None
