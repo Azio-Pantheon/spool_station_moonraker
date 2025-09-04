@@ -87,7 +87,14 @@ class SpoolTracker:
     def _initialize_filament_state(self):
         """Initialize filament type and weight from shared config and database."""
         # Load filament type from shared printer config
-        self.current_filament_type = self.shared_printer_config.filament or "N/A"
+        try:
+            filament_type = self.database.get_item(
+                "HS3", "filament_type", "N/A"
+            ).result()
+            self.current_filament_type = filament_type or "N/A"
+        except Exception as e:
+            logging.warning(f"Failed to load filament type from database: {e}")
+            self.current_filament_type = "N/A"
         
         # Initialize timestamps
         self.first_used: Optional[datetime] = None
@@ -197,41 +204,6 @@ class SpoolTracker:
                 self.current_filament_type != "N/A" and 
                 self.remaining_weight > 0)
 
-    def _check_filament_type_change(self) -> None:
-        """Check if filament type changed in shared config and handle accordingly."""
-        current_shared_type = self.shared_printer_config.filament or "N/A"
-        
-        if current_shared_type != self._last_known_filament_type:
-            old_type = self.current_filament_type
-            self.current_filament_type = current_shared_type
-            self._last_known_filament_type = current_shared_type
-            
-            # Reset weight to 0 when filament type changes
-            self.remaining_weight = 0.0
-            self.first_used = None
-            self.last_used = None
-            self.pending_usage_mm = 0.0
-            
-            logging.info(f"Filament type changed from {old_type} to {current_shared_type}, "
-                        "weight reset to 0")
-            
-            # Send filament change notification
-            if self._filament_exists(current_shared_type):
-                self.server.send_event(
-                    "spool_tracker:filament_changed",
-                    {
-                        "old_type": old_type,
-                        "new_type": current_shared_type,
-                        "new_specs": self._get_filament_specs(current_shared_type),
-                    }
-                )
-            
-            # Update database immediately
-            try:
-                self.database.insert_item("HS3", "remaining_filament_weight", 0.0)
-            except Exception as e:
-                logging.warning(f"Failed to update database after filament change: {e}")
-
     def _filament_exists(self, filament_type: str) -> bool:
         """Check if filament type exists in predefined or custom types."""
         return filament_type in FILAMENT_TYPES or filament_type in self.custom_filaments
@@ -294,9 +266,6 @@ class SpoolTracker:
 
     async def _report_usage(self, eventtime: float) -> float:
         """Periodic task to process accumulated usage and sync database."""
-        # Check for filament type changes
-        self._check_filament_type_change()
-        
         # Only process usage if we can track and have pending usage
         if not self._can_track() or self.pending_usage_mm <= 0:
             return eventtime + self.sync_rate_seconds
