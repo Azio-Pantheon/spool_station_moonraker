@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from ..confighelper import ConfigHelper
     from ..common import WebRequest
     from .klippy_apis import KlippyAPI as APIComp
+    from .database import MoonrakerDatabase
 
 # Hard-coded filament specifications
 FILAMENT_TYPES = {
@@ -58,36 +59,55 @@ class SpoolTracker:
         # Custom filament types (runtime additions)
         self.custom_filaments: Dict[str, Dict[str, Any]] = {}
         
-        # Filament state (in-memory for now)
-        self.current_filament_type = config.get("default_filament", "PETG-CF")
-        self.initial_weight = config.getfloat("initial_weight", 1000.0)  # grams
-        self.used_weight = 0.0  # grams
-        self.first_used: Optional[datetime] = None
-        self.last_used: Optional[datetime] = None
+        # Database and shared config references
+        self.database: MoonrakerDatabase = self.server.lookup_component("database")
+        self.shared_printer_config = self.server.shared_printer_config
+        
+        # Initialize filament state from shared config and database
+        self._initialize_filament_state()
         
         # Usage tracking
         self.pending_usage_mm = 0.0  # Accumulated extrusion in mm
         self._highest_epos: float = 0.0
         self._current_extruder: str = "extruder"
+        self._last_known_filament_type: str = self.current_filament_type
         
-        # Timer for periodic reporting
+        # Timer for periodic reporting and database sync
         self.report_timer = self.eventloop.register_timer(self._report_usage)
         
         # Component references
         self.klippy_apis: APIComp = self.server.lookup_component("klippy_apis")
         
-        # Validate initial filament type
-        if not self._filament_exists(self.current_filament_type):
-            logging.warning(
-                f"Unknown filament type '{self.current_filament_type}', defaulting to PLA"
-            )
-            self.current_filament_type = "PLA"
-        
         self._register_notifications()
         self._register_endpoints()
         
         logging.info(f"Spool Tracker initialized with {self.current_filament_type}, "
-                    f"initial weight: {self.initial_weight}g")
+                    f"remaining weight: {self.get_remaining_weight():.1f}g")
+
+    def _initialize_filament_state(self):
+        """Initialize filament type and weight from shared config and database."""
+        # Load filament type from shared printer config
+        self.current_filament_type = self.shared_printer_config.filament or "N/A"
+        
+        # Initialize timestamps
+        self.first_used: Optional[datetime] = None
+        self.last_used: Optional[datetime] = None
+        
+        # Load remaining weight from database, default to 0 if not found
+        try:
+            remaining_weight = self.database.get_item(
+                "HS3", "remaining_filament_weight", 0.0
+            ).result()
+            self.remaining_weight = float(remaining_weight)
+        except Exception as e:
+            logging.warning(f"Failed to load remaining filament weight from database: {e}")
+            self.remaining_weight = 0.0
+        
+        # If filament type is invalid or N/A, stop tracking
+        if not self._filament_exists(self.current_filament_type) or self.current_filament_type == "N/A":
+            self.current_filament_type = "N/A"
+            self.remaining_weight = 0.0
+            logging.info("Spool Tracker: Invalid or missing filament type, tracking disabled")
 
     def _register_notifications(self):
         """Register WebSocket notifications."""
@@ -105,11 +125,6 @@ class SpoolTracker:
             "/server/spool_tracker/filament",
             ["GET", "POST"],
             self._handle_filament_request,
-        )
-        self.server.register_endpoint(
-            "/server/spool_tracker/reset",
-            ["POST"],
-            self._handle_reset_request,
         )
 
     async def component_init(self) -> None:
@@ -148,6 +163,10 @@ class SpoolTracker:
 
     def _handle_status_update(self, status: Dict[str, Any], _: float) -> None:
         """Handle Klipper status updates to track filament usage."""
+        # Only track if we have valid filament type and weight
+        if not self._can_track():
+            return
+            
         toolhead: Optional[Dict[str, Any]] = status.get("toolhead")
         if toolhead is None:
             return
@@ -171,6 +190,47 @@ class SpoolTracker:
         self.pending_usage_mm += length_mm
         logging.debug(f"Added {length_mm:.3f}mm extrusion, "
                      f"total pending: {self.pending_usage_mm:.3f}mm")
+
+    def _can_track(self) -> bool:
+        """Check if tracking is possible (valid filament type and weight > 0)."""
+        return (self._filament_exists(self.current_filament_type) and 
+                self.current_filament_type != "N/A" and 
+                self.remaining_weight > 0)
+
+    def _check_filament_type_change(self) -> None:
+        """Check if filament type changed in shared config and handle accordingly."""
+        current_shared_type = self.shared_printer_config.filament or "N/A"
+        
+        if current_shared_type != self._last_known_filament_type:
+            old_type = self.current_filament_type
+            self.current_filament_type = current_shared_type
+            self._last_known_filament_type = current_shared_type
+            
+            # Reset weight to 0 when filament type changes
+            self.remaining_weight = 0.0
+            self.first_used = None
+            self.last_used = None
+            self.pending_usage_mm = 0.0
+            
+            logging.info(f"Filament type changed from {old_type} to {current_shared_type}, "
+                        "weight reset to 0")
+            
+            # Send filament change notification
+            if self._filament_exists(current_shared_type):
+                self.server.send_event(
+                    "spool_tracker:filament_changed",
+                    {
+                        "old_type": old_type,
+                        "new_type": current_shared_type,
+                        "new_specs": self._get_filament_specs(current_shared_type),
+                    }
+                )
+            
+            # Update database immediately
+            try:
+                self.database.insert_item("HS3", "remaining_filament_weight", 0.0)
+            except Exception as e:
+                logging.warning(f"Failed to update database after filament change: {e}")
 
     def _filament_exists(self, filament_type: str) -> bool:
         """Check if filament type exists in predefined or custom types."""
@@ -203,6 +263,9 @@ class SpoolTracker:
 
     def _length_to_weight(self, length_mm: float) -> float:
         """Convert filament length to weight using current filament specs."""
+        if not self._filament_exists(self.current_filament_type):
+            return 0.0
+            
         filament_spec = self._get_filament_specs(self.current_filament_type)
         diameter = filament_spec["diameter"]
         density = filament_spec["density"]
@@ -216,6 +279,9 @@ class SpoolTracker:
 
     def _weight_to_length(self, weight_g: float) -> float:
         """Convert filament weight to length using current filament specs."""
+        if not self._filament_exists(self.current_filament_type):
+            return 0.0
+            
         filament_spec = self._get_filament_specs(self.current_filament_type)
         diameter = filament_spec["diameter"]
         density = filament_spec["density"]
@@ -227,15 +293,19 @@ class SpoolTracker:
         return length_mm
 
     async def _report_usage(self, eventtime: float) -> float:
-        """Periodic task to process accumulated usage."""
-        if self.pending_usage_mm <= 0:
+        """Periodic task to process accumulated usage and sync database."""
+        # Check for filament type changes
+        self._check_filament_type_change()
+        
+        # Only process usage if we can track and have pending usage
+        if not self._can_track() or self.pending_usage_mm <= 0:
             return eventtime + self.sync_rate_seconds
 
         # Convert accumulated length to weight
         weight_used = self._length_to_weight(self.pending_usage_mm)
         
-        # Update usage tracking
-        self.used_weight += weight_used
+        # Update remaining weight
+        self.remaining_weight = max(self.remaining_weight - weight_used, 0.0)
         current_time = datetime.now()
         
         if self.first_used is None:
@@ -244,20 +314,26 @@ class SpoolTracker:
         
         logging.info(
             f"Filament usage: +{self.pending_usage_mm:.2f}mm (+{weight_used:.3f}g), "
-            f"Total used: {self.used_weight:.1f}g, "
-            f"Remaining: {self.get_remaining_weight():.1f}g"
+            f"Remaining: {self.remaining_weight:.1f}g"
         )
         
-        # Send notification
+        # Send WebSocket notification (keeping existing format)
         self.server.send_event(
             "spool_tracker:usage_updated",
             {
                 "used_length_mm": self.pending_usage_mm,
                 "used_weight_g": weight_used,
-                "total_used_weight": self.used_weight,
-                "remaining_weight": self.get_remaining_weight(),
+                "total_used_weight": 0,  # Not tracked anymore, keeping for compatibility
+                "remaining_weight": self.remaining_weight,
             }
         )
+        
+        # Sync to database (ignore failures)
+        try:
+            self.database.insert_item("HS3", "remaining_filament_weight", 
+                                    self.remaining_weight)
+        except Exception as e:
+            logging.warning(f"Failed to sync remaining weight to database: {e}")
         
         # Reset accumulator
         self.pending_usage_mm = 0.0
@@ -265,23 +341,24 @@ class SpoolTracker:
         return eventtime + self.sync_rate_seconds
 
     def get_remaining_weight(self) -> float:
-        """Calculate remaining filament weight."""
-        return max(self.initial_weight - self.used_weight, 0.0)
+        """Get remaining filament weight."""
+        return self.remaining_weight
 
     def get_remaining_length(self) -> float:
         """Calculate remaining filament length."""
-        remaining_weight = self.get_remaining_weight()
-        return self._weight_to_length(remaining_weight)
+        return self._weight_to_length(self.remaining_weight)
 
     def get_usage_percentage(self) -> float:
-        """Calculate percentage of filament used."""
-        if self.initial_weight <= 0:
-            return 0.0
-        return min((self.used_weight / self.initial_weight) * 100, 100.0)
+        """Calculate percentage of filament used (not available without initial weight)."""
+        return 0.0  # Cannot calculate without initial weight
 
     async def _handle_status_request(self, web_request: WebRequest):
         """Handle GET /server/spool_tracker/status requests."""
-        filament_spec = self._get_filament_specs(self.current_filament_type)
+        if not self._filament_exists(self.current_filament_type):
+            filament_spec = {"density": 0, "diameter": 0, "name": "Unknown"}
+        else:
+            filament_spec = self._get_filament_specs(self.current_filament_type)
+        
         all_types = list(FILAMENT_TYPES.keys()) + list(self.custom_filaments.keys())
         
         return {
@@ -292,16 +369,17 @@ class SpoolTracker:
                 "diameter": filament_spec["diameter"],
             },
             "weights": {
-                "initial_weight": self.initial_weight,
-                "used_weight": self.used_weight,
+                "initial_weight": 0,  # Not tracked
+                "used_weight": 0,     # Not tracked
                 "remaining_weight": self.get_remaining_weight(),
             },
             "lengths": {
-                "used_length": self._weight_to_length(self.used_weight),
+                "used_length": 0,     # Not tracked
                 "remaining_length": self.get_remaining_length(),
             },
             "usage_percentage": self.get_usage_percentage(),
             "pending_usage_mm": self.pending_usage_mm,
+            "can_track": self._can_track(),
             "timestamps": {
                 "first_used": self.first_used.isoformat() if self.first_used else None,
                 "last_used": self.last_used.isoformat() if self.last_used else None,
@@ -316,30 +394,28 @@ class SpoolTracker:
     async def _handle_filament_request(self, web_request: WebRequest):
         """Handle filament type GET/POST requests."""
         if web_request.get_action() == "POST":
-            # Change filament type and/or weight
-            new_type = web_request.get_str("filament_type", self.current_filament_type)
+            # Extract both filament type and weight from request
+            new_type = web_request.get_str("filament_type", None)
             new_weight = web_request.get_float("weight", None)
             
-            # Check if this is a new custom filament type
-            if not self._filament_exists(new_type):
-                filament_specs = web_request.get("filament_specs", None)
-                if filament_specs is None:
-                    raise self.server.error(
-                        f"Unknown filament type '{new_type}'. "
-                        "Please provide filament_specs with 'density' and 'diameter' fields."
-                    )
+            # Handle filament type change
+            if new_type is not None:
+                # Validate filament type exists
+                if not self._filament_exists(new_type):
+                    raise self.server.error(f"Unknown filament type: {new_type}")
                 
-                # Validate and add custom filament
+                # Update database with new filament type
                 try:
-                    self._add_custom_filament(new_type, filament_specs)
-                except ValueError as e:
-                    raise self.server.error(str(e))
-            
-            # Update filament type if changed
-            old_type = self.current_filament_type
-            if new_type != old_type:
+                    self.database.insert_item("HS3", "filament_type", new_type)
+                except Exception as e:
+                    logging.warning(f"Failed to update filament type in database: {e}")
+                
+                # Update local state immediately to prevent reset-to-0 behavior
+                old_type = self.current_filament_type
                 self.current_filament_type = new_type
-                logging.info(f"Changed filament type from {old_type} to {new_type}")
+                self._last_known_filament_type = new_type
+                
+                logging.info(f"Updated filament type from {old_type} to {new_type}")
                 
                 # Send filament change notification
                 self.server.send_event(
@@ -351,34 +427,47 @@ class SpoolTracker:
                     }
                 )
             
-            # Update initial weight if provided
+            # Handle weight change
             if new_weight is not None:
-                if new_weight <= 0:
-                    raise self.server.error("Weight must be greater than 0")
+                if new_weight < 0:
+                    raise self.server.error("Weight must be non-negative")
                 
-                old_weight = self.initial_weight
-                self.initial_weight = new_weight
-                logging.info(f"Updated initial weight from {old_weight:.1f}g to {new_weight:.1f}g")
+                old_weight = self.remaining_weight
+                self.remaining_weight = new_weight
+                logging.info(f"Updated remaining weight from {old_weight:.1f}g to {new_weight:.1f}g")
+                
+                # Sync to database immediately
+                try:
+                    self.database.insert_item("HS3", "remaining_filament_weight", 
+                                            new_weight)
+                except Exception as e:
+                    logging.warning(f"Failed to update database: {e}")
                 
                 # Send usage update notification
                 self.server.send_event(
                     "spool_tracker:usage_updated",
                     {
-                        "initial_weight_changed": True,
+                        "weight_changed": True,
                         "old_weight": old_weight,
                         "new_weight": new_weight,
-                        "remaining_weight": self.get_remaining_weight(),
-                        "total_used_weight": self.used_weight,
+                        "remaining_weight": self.remaining_weight,
+                        "total_used_weight": 0,
                     }
                 )
         
         # Return current filament info (for both GET and POST)
         all_types = list(FILAMENT_TYPES.keys()) + list(self.custom_filaments.keys())
         
+        if self._filament_exists(self.current_filament_type):
+            filament_specs = self._get_filament_specs(self.current_filament_type)
+        else:
+            filament_specs = {"density": 0, "diameter": 0, "name": "Unknown"}
+        
         return {
             "filament_type": self.current_filament_type,
-            "filament_specs": self._get_filament_specs(self.current_filament_type),
-            "initial_weight": self.initial_weight,
+            "filament_specs": filament_specs,
+            "remaining_weight": self.remaining_weight,
+            "can_track": self._can_track(),
             "available_types": {
                 "predefined": list(FILAMENT_TYPES.keys()),
                 "custom": list(self.custom_filaments.keys()),
@@ -386,63 +475,21 @@ class SpoolTracker:
             },
         }
 
-    async def _handle_reset_request(self, web_request: WebRequest):
-        """Handle POST /server/spool_tracker/reset requests."""
-        reset_type = web_request.get_str("type", "usage")
-        
-        if reset_type == "usage":
-            # Reset usage counters
-            old_used = self.used_weight
-            self.used_weight = 0.0
-            self.first_used = None
-            self.last_used = None
-            self.pending_usage_mm = 0.0
-            logging.info(f"Reset usage counters (was {old_used:.1f}g used)")
-            
-        elif reset_type == "weight":
-            # Reset initial weight
-            new_weight = web_request.get_float("weight")
-            old_weight = self.initial_weight
-            self.initial_weight = new_weight
-            logging.info(f"Reset initial weight from {old_weight:.1f}g to {new_weight:.1f}g")
-            
-        elif reset_type == "all":
-            # Reset everything
-            self.used_weight = 0.0
-            self.first_used = None
-            self.last_used = None
-            self.pending_usage_mm = 0.0
-            new_weight = web_request.get_float("weight", self.initial_weight)
-            self.initial_weight = new_weight
-            logging.info("Reset all tracking data")
-            
-        else:
-            raise self.server.error(f"Invalid reset type: {reset_type}")
-        
-        # Send notification
-        self.server.send_event(
-            "spool_tracker:usage_updated",
-            {
-                "reset_type": reset_type,
-                "remaining_weight": self.get_remaining_weight(),
-                "total_used_weight": self.used_weight,
-            }
-        )
-        
-        return {"message": f"Reset {reset_type} successful"}
-
     async def close(self):
         """Clean shutdown of component."""
         logging.info("Shutting down Spool Tracker")
         self.report_timer.stop()
         
+        # Final database sync
+        try:
+            self.database.insert_item("HS3", "remaining_filament_weight", 
+                                    self.remaining_weight)
+        except Exception as e:
+            logging.warning(f"Failed final database sync: {e}")
+        
         # Log final stats
-        if self.used_weight > 0:
-            logging.info(
-                f"Final usage: {self.used_weight:.1f}g "
-                f"({self.get_usage_percentage():.1f}%), "
-                f"Remaining: {self.get_remaining_weight():.1f}g"
-            )
+        if self.remaining_weight > 0:
+            logging.info(f"Final remaining weight: {self.remaining_weight:.1f}g")
 
 
 def load_component(config: ConfigHelper) -> SpoolTracker:
