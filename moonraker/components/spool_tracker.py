@@ -266,10 +266,6 @@ class SpoolTracker:
 
     async def _report_usage(self, eventtime: float) -> float:
         """Periodic task to process accumulated usage and sync database."""
-        # Only process usage if we can track and have pending usage
-        if not self._can_track() or self.pending_usage_mm <= 0:
-            return eventtime + self.sync_rate_seconds
-
         # Convert accumulated length to weight
         weight_used = self._length_to_weight(self.pending_usage_mm)
         
@@ -297,6 +293,10 @@ class SpoolTracker:
             }
         )
         
+        # Only process usage if we can track and have pending usage
+        if not self._can_track() or self.pending_usage_mm <= 0:
+            return eventtime + self.sync_rate_seconds
+
         # Sync to database (ignore failures)
         try:
             self.database.insert_item("HS3", "remaining_filament_weight", 
