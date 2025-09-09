@@ -265,7 +265,37 @@ class SpoolTracker:
         return length_mm
 
     async def _report_usage(self, eventtime: float) -> float:
-        """Periodic task to process accumulated usage and sync database."""
+        """Periodic task to process accumulated usage, sync database, and check for filament changes."""
+        
+        # Check for filament type changes from shared config (database updates)
+        try:
+            shared_filament_type = getattr(self.shared_printer_config, 'filament', '') or "N/A"
+            
+            # If shared config filament type differs from our cached type, update it
+            if shared_filament_type != self.current_filament_type:
+                logging.info(f"Detected filament type change from shared config: {self.current_filament_type} -> {shared_filament_type}")
+                old_type = self.current_filament_type
+                self.current_filament_type = shared_filament_type
+                self._last_known_filament_type = shared_filament_type
+                
+                # Send filament change notification if the new filament type is valid
+                if self._filament_exists(shared_filament_type):
+                    self.server.send_event(
+                        "spool_tracker:filament_changed",
+                        {
+                            "old_type": old_type,
+                            "new_type": shared_filament_type,
+                            "new_specs": self._get_filament_specs(shared_filament_type),
+                            "source": "database_sync"  # Indicate this came from database sync
+                        }
+                    )
+                else:
+                    # If new filament type is invalid, disable tracking
+                    self.remaining_weight = 0.0
+                    logging.info(f"Filament type '{shared_filament_type}' is invalid, disabling tracking")
+        except Exception as e:
+            logging.warning(f"Failed to sync filament type from shared config: {e}")
+        
         # Convert accumulated length to weight
         weight_used = self._length_to_weight(self.pending_usage_mm)
         
@@ -282,7 +312,7 @@ class SpoolTracker:
             f"Remaining: {self.remaining_weight:.1f}g"
         )
         
-        # Send WebSocket notification (keeping existing format)
+        # Send WebSocket notification with current state to prevent desync
         self.server.send_event(
             "spool_tracker:usage_updated",
             {
@@ -290,6 +320,8 @@ class SpoolTracker:
                 "used_weight_g": weight_used,
                 "total_used_weight": 0,  # Not tracked anymore, keeping for compatibility
                 "remaining_weight": self.remaining_weight,
+                "filament_type": self.current_filament_type,  # Add current filament type
+                "can_track": self._can_track(),  # Add current tracking capability
             }
         )
         
@@ -367,7 +399,33 @@ class SpoolTracker:
             new_type = web_request.get_str("filament_type", None)
             new_weight = web_request.get_float("weight", None)
             
-            # Handle filament type change
+            # If only weight is provided (no filament type), sync filament type from shared config first
+            if new_weight is not None and new_type is None:
+                try:
+                    # Get current filament type from shared config (which reflects database state)
+                    shared_filament_type = getattr(self.shared_printer_config, 'filament', '') or "N/A"
+                    
+                    # If shared config filament type differs from our cached type, update it
+                    if shared_filament_type != self.current_filament_type:
+                        logging.info(f"Syncing filament type from shared config: {self.current_filament_type} -> {shared_filament_type}")
+                        old_type = self.current_filament_type
+                        self.current_filament_type = shared_filament_type
+                        self._last_known_filament_type = shared_filament_type
+                        
+                        # Send filament change notification
+                        if self._filament_exists(shared_filament_type):
+                            self.server.send_event(
+                                "spool_tracker:filament_changed",
+                                {
+                                    "old_type": old_type,
+                                    "new_type": shared_filament_type,
+                                    "new_specs": self._get_filament_specs(shared_filament_type),
+                                }
+                            )
+                except Exception as e:
+                    logging.warning(f"Failed to sync filament type from shared config during weight update: {e}")
+            
+            # Handle filament type change (explicit update)
             if new_type is not None:
                 # Validate filament type exists
                 if not self._filament_exists(new_type):
