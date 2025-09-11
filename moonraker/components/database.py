@@ -147,6 +147,9 @@ class MoonrakerDatabase:
                                 continue
                         remaining = cursor.next()
 
+        # Initialize shared printer config from database
+        self._load_shared_printer_config()
+
         # Protected Namespaces have read-only API access.  Write access can
         # be granted by enabling the debug option.  Forbidden namespaces
         # have no API access.  This cannot be overridden.
@@ -192,6 +195,64 @@ class MoonrakerDatabase:
         self.server.register_debug_endpoint(
             "/debug/database/item", RequestType.all(), self._handle_item_request
         )
+
+    def _load_shared_printer_config(self) -> None:
+        """Load shared printer config values from database during initialization."""
+        config_namespace = "HS3"
+
+        # field_name_in_db: (attr_on_shared_config, type, default)
+        schema = {
+            "filament_type":       ("filament",            str,   ""),
+            "nozzle_size":         ("nozzle",              str,   ""),
+            "wet_filament_purge":  ("wet_filament_purge",  int,   0),
+            "last_print_time":     ("last_print_time",     float, 0.0),
+            "is_purging":          ("is_purging",          int,   0),
+            "enable_prime":        ("enable_prime",        int,   0),
+        }
+
+        def _coerce(value, typ, default):
+            # Be permissive about common stringy inputs for ints/bools
+            try:
+                if typ is int and isinstance(value, str):
+                    v = value.strip().lower()
+                    if v in ("true", "yes", "on"):  # treat as 1
+                        return 1
+                    if v in ("false", "no", "off"): # treat as 0
+                        return 0
+                return typ(value)
+            except (TypeError, ValueError):
+                return default
+
+        try:
+            for field_name, (attr, typ, default) in schema.items():
+                try:
+                    raw = self.get_item(config_namespace, field_name).result()
+                except Exception as e:
+                    logging.warning(
+                        "Shared config: %s missing/failed to load (%s); using default=%r",
+                        field_name, e, default
+                    )
+                    value = default
+                else:
+                    value = _coerce(raw, typ, default)
+
+                try:
+                    setattr(self.shared_printer_config, attr, value)
+                except Exception as e:
+                    logging.warning(
+                        "Shared config: failed to set %s on shared_printer_config (%s)",
+                        attr, e
+                    )
+
+            logging.debug(
+                "Shared config loaded: %s",
+                {attr: getattr(self.shared_printer_config, attr, None)
+                for _, (attr, _, _) in schema.items()}
+            )
+
+        except Exception as e:
+            logging.exception("Error loading shared printer config: %s", e)
+            logging.info("Using default values for shared printer config")
 
     def get_database_path(self) -> str:
         return self.database_path
