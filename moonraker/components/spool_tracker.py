@@ -1,6 +1,5 @@
 # Spool Tracker Component for Moonraker
 #
-# Copyright (C) 2024 <Your Name>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -72,6 +71,15 @@ class SpoolTracker:
         self._current_extruder: str = "extruder"
         self._last_known_filament_type: str = self.current_filament_type
         
+        # Pedometer tracking for X, Y, Z movement
+        self.pedometer_x: float = 0.0
+        self.pedometer_y: float = 0.0
+        self.pedometer_z: float = 0.0
+        self._last_x_pos: Optional[float] = None
+        self._last_y_pos: Optional[float] = None
+        self._last_z_pos: Optional[float] = None
+        self._initialize_pedometer_state()
+        
         # Timer for periodic reporting and database sync
         self.report_timer = self.eventloop.register_timer(self._report_usage)
         
@@ -116,6 +124,35 @@ class SpoolTracker:
             self.remaining_weight = 0.0
             logging.info("Spool Tracker: Invalid or missing filament type, tracking disabled")
 
+    def _initialize_pedometer_state(self):
+        """Initialize pedometer X, Y, Z values from database."""
+        try:
+            self.pedometer_x = float(self.database.get_item(
+                "HS3", "pedometer_x", 0.0
+            ).result())
+        except Exception as e:
+            logging.warning(f"Failed to load pedometer_x from database: {e}")
+            self.pedometer_x = 0.0
+        
+        try:
+            self.pedometer_y = float(self.database.get_item(
+                "HS3", "pedometer_y", 0.0
+            ).result())
+        except Exception as e:
+            logging.warning(f"Failed to load pedometer_y from database: {e}")
+            self.pedometer_y = 0.0
+        
+        try:
+            self.pedometer_z = float(self.database.get_item(
+                "HS3", "pedometer_z", 0.0
+            ).result())
+        except Exception as e:
+            logging.warning(f"Failed to load pedometer_z from database: {e}")
+            self.pedometer_z = 0.0
+        
+        logging.info(f"Pedometer initialized: X={self.pedometer_x:.2f}mm, "
+                    f"Y={self.pedometer_y:.2f}mm, Z={self.pedometer_z:.2f}mm")
+
     def _register_notifications(self):
         """Register WebSocket notifications."""
         self.server.register_notification("spool_tracker:usage_updated")
@@ -125,7 +162,7 @@ class SpoolTracker:
         """Register HTTP API endpoints."""
         self.server.register_endpoint(
             "/server/spool_tracker/status",
-            ["GET"],
+            ["GET", "POST"],
             self._handle_status_request,
         )
         self.server.register_endpoint(
@@ -154,13 +191,20 @@ class SpoolTracker:
             
             toolhead = result.get("toolhead", {})
             self._current_extruder = toolhead.get("extruder", "extruder")
-            initial_e_pos = toolhead.get("position", [None]*4)[3]
+            position = toolhead.get("position", [None, None, None, None])
             
-            logging.debug(f"Initial E position: {initial_e_pos}")
+            # Initialize X, Y, Z positions for pedometer tracking
+            self._last_x_pos = position[0]
+            self._last_y_pos = position[1]
+            self._last_z_pos = position[2]
+            initial_e_pos = position[3]
+            
+            logging.debug(f"Initial position: X={self._last_x_pos}, Y={self._last_y_pos}, "
+                         f"Z={self._last_z_pos}, E={initial_e_pos}")
             if initial_e_pos is not None:
                 self._highest_epos = initial_e_pos
                 self.report_timer.start()
-                logging.info("Spool Tracker: Started monitoring filament usage")
+                logging.info("Spool Tracker: Started monitoring filament usage and pedometer")
             else:
                 logging.error("Spool Tracker: Unable to subscribe to extruder position")
                 raise self.server.error("Unable to subscribe to extruder position")
@@ -169,16 +213,36 @@ class SpoolTracker:
             raise
 
     def _handle_status_update(self, status: Dict[str, Any], _: float) -> None:
-        """Handle Klipper status updates to track filament usage."""
-        # Only track if we have valid filament type and weight
-        if not self._can_track():
-            return
-            
+        """Handle Klipper status updates to track filament usage and pedometer."""
         toolhead: Optional[Dict[str, Any]] = status.get("toolhead")
         if toolhead is None:
             return
+        
+        position = toolhead.get("position", [None, None, None, None])
+        
+        # Track X, Y, Z movement for pedometer (always track, independent of filament)
+        x_pos, y_pos, z_pos = position[0], position[1], position[2]
+        
+        if x_pos is not None and self._last_x_pos is not None:
+            self.pedometer_x += abs(x_pos - self._last_x_pos)
+        if y_pos is not None and self._last_y_pos is not None:
+            self.pedometer_y += abs(y_pos - self._last_y_pos)
+        if z_pos is not None and self._last_z_pos is not None:
+            self.pedometer_z += abs(z_pos - self._last_z_pos)
+        
+        # Update last positions
+        if x_pos is not None:
+            self._last_x_pos = x_pos
+        if y_pos is not None:
+            self._last_y_pos = y_pos
+        if z_pos is not None:
+            self._last_z_pos = z_pos
+        
+        # Only track filament if we have valid filament type and weight
+        if not self._can_track():
+            return
 
-        epos: float = toolhead.get("position", [0, 0, 0, self._highest_epos])[3]
+        epos: float = position[3] if position[3] is not None else self._highest_epos
         extr = toolhead.get("extruder", self._current_extruder)
         
         # Handle extruder changes
@@ -336,6 +400,14 @@ class SpoolTracker:
         except Exception as e:
             logging.warning(f"Failed to sync remaining weight to database: {e}")
         
+        # Sync pedometer values to database (always, independent of filament tracking)
+        try:
+            self.database.insert_item("HS3", "pedometer_x", self.pedometer_x)
+            self.database.insert_item("HS3", "pedometer_y", self.pedometer_y)
+            self.database.insert_item("HS3", "pedometer_z", self.pedometer_z)
+        except Exception as e:
+            logging.warning(f"Failed to sync pedometer values to database: {e}")
+        
         # Reset accumulator
         self.pending_usage_mm = 0.0
         
@@ -354,7 +426,46 @@ class SpoolTracker:
         return 0.0  # Cannot calculate without initial weight
 
     async def _handle_status_request(self, web_request: WebRequest):
-        """Handle GET /server/spool_tracker/status requests."""
+        """Handle GET/POST /server/spool_tracker/status requests."""
+        
+        # Handle POST requests to modify pedometer values
+        if web_request.get_action() == "POST":
+            pedometer_x = web_request.get_float("pedometer_x", None)
+            pedometer_y = web_request.get_float("pedometer_y", None)
+            pedometer_z = web_request.get_float("pedometer_z", None)
+            
+            # Update pedometer values if provided
+            if pedometer_x is not None:
+                if pedometer_x < 0:
+                    raise self.server.error("Pedometer X value must be non-negative")
+                self.pedometer_x = pedometer_x
+                logging.info(f"Updated pedometer_x to {pedometer_x:.2f}mm")
+                try:
+                    self.database.insert_item("HS3", "pedometer_x", pedometer_x)
+                except Exception as e:
+                    logging.warning(f"Failed to update pedometer_x in database: {e}")
+            
+            if pedometer_y is not None:
+                if pedometer_y < 0:
+                    raise self.server.error("Pedometer Y value must be non-negative")
+                self.pedometer_y = pedometer_y
+                logging.info(f"Updated pedometer_y to {pedometer_y:.2f}mm")
+                try:
+                    self.database.insert_item("HS3", "pedometer_y", pedometer_y)
+                except Exception as e:
+                    logging.warning(f"Failed to update pedometer_y in database: {e}")
+            
+            if pedometer_z is not None:
+                if pedometer_z < 0:
+                    raise self.server.error("Pedometer Z value must be non-negative")
+                self.pedometer_z = pedometer_z
+                logging.info(f"Updated pedometer_z to {pedometer_z:.2f}mm")
+                try:
+                    self.database.insert_item("HS3", "pedometer_z", pedometer_z)
+                except Exception as e:
+                    logging.warning(f"Failed to update pedometer_z in database: {e}")
+        
+        # Return current status (for both GET and POST)
         if not self._filament_exists(self.current_filament_type):
             filament_spec = {"density": 0, "diameter": 0, "name": "Unknown"}
         else:
@@ -389,6 +500,11 @@ class SpoolTracker:
                 "predefined": list(FILAMENT_TYPES.keys()),
                 "custom": list(self.custom_filaments.keys()),
                 "all": all_types,
+            },
+            "pedometer": {
+                "x": self.pedometer_x,
+                "y": self.pedometer_y,
+                "z": self.pedometer_z,
             },
         }
 
@@ -514,9 +630,19 @@ class SpoolTracker:
         except Exception as e:
             logging.warning(f"Failed final database sync: {e}")
         
+        # Final pedometer sync
+        try:
+            self.database.insert_item("HS3", "pedometer_x", self.pedometer_x)
+            self.database.insert_item("HS3", "pedometer_y", self.pedometer_y)
+            self.database.insert_item("HS3", "pedometer_z", self.pedometer_z)
+        except Exception as e:
+            logging.warning(f"Failed final pedometer sync: {e}")
+        
         # Log final stats
         if self.remaining_weight > 0:
             logging.info(f"Final remaining weight: {self.remaining_weight:.1f}g")
+        logging.info(f"Final pedometer: X={self.pedometer_x:.2f}mm, "
+                    f"Y={self.pedometer_y:.2f}mm, Z={self.pedometer_z:.2f}mm")
 
 
 def load_component(config: ConfigHelper) -> SpoolTracker:
