@@ -1,5 +1,6 @@
 # Spool Tracker Component for Moonraker
 #
+# Copyright (C) 2024 <Your Name>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -389,6 +390,14 @@ class SpoolTracker:
             }
         )
         
+        # Sync pedometer values to database (always, independent of filament tracking)
+        try:
+            self.database.insert_item("HS3", "pedometer_x", self.pedometer_x)
+            self.database.insert_item("HS3", "pedometer_y", self.pedometer_y)
+            self.database.insert_item("HS3", "pedometer_z", self.pedometer_z)
+        except Exception as e:
+            logging.warning(f"Failed to sync pedometer values to database: {e}")
+        
         # Only process usage if we can track and have pending usage
         if not self._can_track() or self.pending_usage_mm <= 0:
             return eventtime + self.sync_rate_seconds
@@ -399,14 +408,6 @@ class SpoolTracker:
                                     self.remaining_weight)
         except Exception as e:
             logging.warning(f"Failed to sync remaining weight to database: {e}")
-        
-        # Sync pedometer values to database (always, independent of filament tracking)
-        try:
-            self.database.insert_item("HS3", "pedometer_x", self.pedometer_x)
-            self.database.insert_item("HS3", "pedometer_y", self.pedometer_y)
-            self.database.insert_item("HS3", "pedometer_z", self.pedometer_z)
-        except Exception as e:
-            logging.warning(f"Failed to sync pedometer values to database: {e}")
         
         # Reset accumulator
         self.pending_usage_mm = 0.0
