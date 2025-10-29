@@ -72,6 +72,15 @@ class SpoolTracker:
         self._current_extruder: str = "extruder"
         self._last_known_filament_type: str = self.current_filament_type
         
+        # odometer tracking for X, Y, Z movement
+        self.odometer_x: float = 0.0
+        self.odometer_y: float = 0.0
+        self.odometer_z: float = 0.0
+        self._last_x_pos: Optional[float] = None
+        self._last_y_pos: Optional[float] = None
+        self._last_z_pos: Optional[float] = None
+        self._initialize_odometer_state()
+        
         # Timer for periodic reporting and database sync
         self.report_timer = self.eventloop.register_timer(self._report_usage)
         
@@ -116,6 +125,35 @@ class SpoolTracker:
             self.remaining_weight = 0.0
             logging.info("Spool Tracker: Invalid or missing filament type, tracking disabled")
 
+    def _initialize_odometer_state(self):
+        """Initialize odometer X, Y, Z values from database."""
+        try:
+            self.odometer_x = float(self.database.get_item(
+                "HS3", "odometer_x", 0.0
+            ).result())
+        except Exception as e:
+            logging.warning(f"Failed to load odometer_x from database: {e}")
+            self.odometer_x = 0.0
+        
+        try:
+            self.odometer_y = float(self.database.get_item(
+                "HS3", "odometer_y", 0.0
+            ).result())
+        except Exception as e:
+            logging.warning(f"Failed to load odometer_y from database: {e}")
+            self.odometer_y = 0.0
+        
+        try:
+            self.odometer_z = float(self.database.get_item(
+                "HS3", "odometer_z", 0.0
+            ).result())
+        except Exception as e:
+            logging.warning(f"Failed to load odometer_z from database: {e}")
+            self.odometer_z = 0.0
+        
+        logging.info(f"odometer initialized: X={self.odometer_x:.2f}mm, "
+                    f"Y={self.odometer_y:.2f}mm, Z={self.odometer_z:.2f}mm")
+
     def _register_notifications(self):
         """Register WebSocket notifications."""
         self.server.register_notification("spool_tracker:usage_updated")
@@ -125,7 +163,7 @@ class SpoolTracker:
         """Register HTTP API endpoints."""
         self.server.register_endpoint(
             "/server/spool_tracker/status",
-            ["GET"],
+            ["GET", "POST"],
             self._handle_status_request,
         )
         self.server.register_endpoint(
@@ -154,13 +192,20 @@ class SpoolTracker:
             
             toolhead = result.get("toolhead", {})
             self._current_extruder = toolhead.get("extruder", "extruder")
-            initial_e_pos = toolhead.get("position", [None]*4)[3]
+            position = toolhead.get("position", [None, None, None, None])
             
-            logging.debug(f"Initial E position: {initial_e_pos}")
+            # Initialize X, Y, Z positions for odometer tracking
+            self._last_x_pos = position[0]
+            self._last_y_pos = position[1]
+            self._last_z_pos = position[2]
+            initial_e_pos = position[3]
+            
+            logging.debug(f"Initial position: X={self._last_x_pos}, Y={self._last_y_pos}, "
+                         f"Z={self._last_z_pos}, E={initial_e_pos}")
             if initial_e_pos is not None:
                 self._highest_epos = initial_e_pos
                 self.report_timer.start()
-                logging.info("Spool Tracker: Started monitoring filament usage")
+                logging.info("Spool Tracker: Started monitoring filament usage and odometer")
             else:
                 logging.error("Spool Tracker: Unable to subscribe to extruder position")
                 raise self.server.error("Unable to subscribe to extruder position")
@@ -169,16 +214,36 @@ class SpoolTracker:
             raise
 
     def _handle_status_update(self, status: Dict[str, Any], _: float) -> None:
-        """Handle Klipper status updates to track filament usage."""
-        # Only track if we have valid filament type and weight
-        if not self._can_track():
-            return
-            
+        """Handle Klipper status updates to track filament usage and odometer."""
         toolhead: Optional[Dict[str, Any]] = status.get("toolhead")
         if toolhead is None:
             return
+        
+        position = toolhead.get("position", [None, None, None, None])
+        
+        # Track X, Y, Z movement for odometer (always track, independent of filament)
+        x_pos, y_pos, z_pos = position[0], position[1], position[2]
+        
+        if x_pos is not None and self._last_x_pos is not None:
+            self.odometer_x += abs(x_pos - self._last_x_pos)
+        if y_pos is not None and self._last_y_pos is not None:
+            self.odometer_y += abs(y_pos - self._last_y_pos)
+        if z_pos is not None and self._last_z_pos is not None:
+            self.odometer_z += abs(z_pos - self._last_z_pos)
+        
+        # Update last positions
+        if x_pos is not None:
+            self._last_x_pos = x_pos
+        if y_pos is not None:
+            self._last_y_pos = y_pos
+        if z_pos is not None:
+            self._last_z_pos = z_pos
+        
+        # Only track filament if we have valid filament type and weight
+        if not self._can_track():
+            return
 
-        epos: float = toolhead.get("position", [0, 0, 0, self._highest_epos])[3]
+        epos: float = position[3] if position[3] is not None else self._highest_epos
         extr = toolhead.get("extruder", self._current_extruder)
         
         # Handle extruder changes
@@ -325,6 +390,14 @@ class SpoolTracker:
             }
         )
         
+        # Sync odometer values to database (always, independent of filament tracking)
+        try:
+            self.database.insert_item("HS3", "odometer_x", self.odometer_x)
+            self.database.insert_item("HS3", "odometer_y", self.odometer_y)
+            self.database.insert_item("HS3", "odometer_z", self.odometer_z)
+        except Exception as e:
+            logging.warning(f"Failed to sync odometer values to database: {e}")
+        
         # Only process usage if we can track and have pending usage
         if not self._can_track() or self.pending_usage_mm <= 0:
             return eventtime + self.sync_rate_seconds
@@ -354,7 +427,46 @@ class SpoolTracker:
         return 0.0  # Cannot calculate without initial weight
 
     async def _handle_status_request(self, web_request: WebRequest):
-        """Handle GET /server/spool_tracker/status requests."""
+        """Handle GET/POST /server/spool_tracker/status requests."""
+        
+        # Handle POST requests to modify odometer values
+        if web_request.get_action() == "POST":
+            odometer_x = web_request.get_float("odometer_x", None)
+            odometer_y = web_request.get_float("odometer_y", None)
+            odometer_z = web_request.get_float("odometer_z", None)
+            
+            # Update odometer values if provided
+            if odometer_x is not None:
+                if odometer_x < 0:
+                    raise self.server.error("odometer X value must be non-negative")
+                self.odometer_x = odometer_x
+                logging.info(f"Updated odometer_x to {odometer_x:.2f}mm")
+                try:
+                    self.database.insert_item("HS3", "odometer_x", odometer_x)
+                except Exception as e:
+                    logging.warning(f"Failed to update odometer_x in database: {e}")
+            
+            if odometer_y is not None:
+                if odometer_y < 0:
+                    raise self.server.error("odometer Y value must be non-negative")
+                self.odometer_y = odometer_y
+                logging.info(f"Updated odometer_y to {odometer_y:.2f}mm")
+                try:
+                    self.database.insert_item("HS3", "odometer_y", odometer_y)
+                except Exception as e:
+                    logging.warning(f"Failed to update odometer_y in database: {e}")
+            
+            if odometer_z is not None:
+                if odometer_z < 0:
+                    raise self.server.error("odometer Z value must be non-negative")
+                self.odometer_z = odometer_z
+                logging.info(f"Updated odometer_z to {odometer_z:.2f}mm")
+                try:
+                    self.database.insert_item("HS3", "odometer_z", odometer_z)
+                except Exception as e:
+                    logging.warning(f"Failed to update odometer_z in database: {e}")
+        
+        # Return current status (for both GET and POST)
         if not self._filament_exists(self.current_filament_type):
             filament_spec = {"density": 0, "diameter": 0, "name": "Unknown"}
         else:
@@ -389,6 +501,11 @@ class SpoolTracker:
                 "predefined": list(FILAMENT_TYPES.keys()),
                 "custom": list(self.custom_filaments.keys()),
                 "all": all_types,
+            },
+            "odometer": {
+                "x": self.odometer_x,
+                "y": self.odometer_y,
+                "z": self.odometer_z,
             },
         }
 
@@ -514,9 +631,19 @@ class SpoolTracker:
         except Exception as e:
             logging.warning(f"Failed final database sync: {e}")
         
+        # Final odometer sync
+        try:
+            self.database.insert_item("HS3", "odometer_x", self.odometer_x)
+            self.database.insert_item("HS3", "odometer_y", self.odometer_y)
+            self.database.insert_item("HS3", "odometer_z", self.odometer_z)
+        except Exception as e:
+            logging.warning(f"Failed final odometer sync: {e}")
+        
         # Log final stats
         if self.remaining_weight > 0:
             logging.info(f"Final remaining weight: {self.remaining_weight:.1f}g")
+        logging.info(f"Final odometer: X={self.odometer_x:.2f}mm, "
+                    f"Y={self.odometer_y:.2f}mm, Z={self.odometer_z:.2f}mm")
 
 
 def load_component(config: ConfigHelper) -> SpoolTracker:
