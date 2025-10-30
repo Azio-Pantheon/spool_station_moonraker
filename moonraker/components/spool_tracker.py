@@ -53,6 +53,9 @@ class SpoolTracker:
         self.server = config.get_server()
         self.eventloop = self.server.get_event_loop()
         
+        # Ready flag - set to True after initialization completes
+        self._ready = False
+        
         # Configuration
         self.sync_rate_seconds = config.getint("sync_rate", default=5, minval=1)
         
@@ -95,6 +98,9 @@ class SpoolTracker:
         
         self._register_notifications()
         self._register_endpoints()
+        
+        # Mark component as ready
+        self._ready = True
         
         logging.info(f"Spool Tracker initialized with {self.current_filament_type}, "
                     f"remaining weight: {self.get_remaining_weight():.1f}g")
@@ -478,6 +484,23 @@ class SpoolTracker:
     async def _handle_status_request(self, web_request: WebRequest):
         """Handle GET/POST /server/spool_tracker/status requests."""
         
+        # Return minimal valid response if component not fully initialized
+        if not self._ready:
+            return {
+                "filament_type": "N/A",
+                "filament_name": "Initializing...",
+                "filament_specs": {"density": 0, "diameter": 0},
+                "weights": {"initial_weight": 0, "used_weight": 0, "remaining_weight": 0},
+                "lengths": {"used_length": 0, "remaining_length": 0},
+                "usage_percentage": 0.0,
+                "pending_usage_mm": 0.0,
+                "can_track": False,
+                "timestamps": {"first_used": None, "last_used": None},
+                "available_filaments": {"predefined": [], "custom": [], "all": []},
+                "odometer": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "tripmeter": {"x": 0.0, "y": 0.0, "z": 0.0},
+            }
+        
         # Handle POST requests to modify odometer values
         if web_request.get_action() == "POST":
             odometer_x = web_request.get_float("odometer_x", None)
@@ -594,6 +617,17 @@ class SpoolTracker:
 
     async def _handle_filament_request(self, web_request: WebRequest):
         """Handle filament type GET/POST requests."""
+        
+        # Return minimal valid response if component not fully initialized
+        if not self._ready:
+            return {
+                "filament_type": "N/A",
+                "filament_specs": {"density": 0, "diameter": 0, "name": "Initializing..."},
+                "remaining_weight": 0.0,
+                "can_track": False,
+                "available_types": {"predefined": [], "custom": [], "all": []},
+            }
+        
         if web_request.get_action() == "POST":
             # Extract both filament type and weight from request
             new_type = web_request.get_str("filament_type", None)
