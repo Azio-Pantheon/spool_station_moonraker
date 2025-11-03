@@ -75,6 +75,11 @@ class SpoolTracker:
         self._current_extruder: str = "extruder"
         self._last_known_filament_type: str = self.current_filament_type
         
+        # Spool usage tracking (initial_weight, used_weight, used_length)
+        self.initial_weight: float = 0.0  # Weight when spool was first set
+        self.used_weight: float = 0.0  # Total weight used from spool
+        self.used_length: float = 0.0  # Total length used in meters
+        
         # odometer tracking for X, Y, Z movement
         self.odometer_x: float = 0.0
         self.odometer_y: float = 0.0
@@ -130,6 +135,36 @@ class SpoolTracker:
         except Exception as e:
             logging.warning(f"Failed to load remaining filament weight from database: {e}")
             self.remaining_weight = 0.0
+        
+        # Load initial weight from database
+        try:
+            initial_weight = self.database.get_item(
+                "HS3", "initial_filament_weight", 0.0
+            ).result()
+            self.initial_weight = float(initial_weight)
+        except Exception as e:
+            logging.warning(f"Failed to load initial filament weight from database: {e}")
+            self.initial_weight = 0.0
+        
+        # Load used weight from database
+        try:
+            used_weight = self.database.get_item(
+                "HS3", "used_filament_weight", 0.0
+            ).result()
+            self.used_weight = float(used_weight)
+        except Exception as e:
+            logging.warning(f"Failed to load used filament weight from database: {e}")
+            self.used_weight = 0.0
+        
+        # Load used length from database (in meters)
+        try:
+            used_length = self.database.get_item(
+                "HS3", "used_filament_length", 0.0
+            ).result()
+            self.used_length = float(used_length)
+        except Exception as e:
+            logging.warning(f"Failed to load used filament length from database: {e}")
+            self.used_length = 0.0
         
         # If filament type is invalid or N/A, stop tracking
         if not self._filament_exists(self.current_filament_type) or self.current_filament_type == "N/A":
@@ -413,6 +448,15 @@ class SpoolTracker:
         
         # Update remaining weight
         self.remaining_weight = max(self.remaining_weight - weight_used, 0.0)
+        
+        # Update used_length (convert mm to meters)
+        if self.pending_usage_mm > 0:
+            self.used_length += self.pending_usage_mm / 1000.0  # Convert mm to meters
+        
+        # Update used_weight (only if we have an initial weight)
+        if self.initial_weight > 0:
+            self.used_weight = self.initial_weight - self.remaining_weight
+        
         current_time = datetime.now()
         
         if self.first_used is None:
@@ -461,8 +505,12 @@ class SpoolTracker:
         try:
             self.database.insert_item("HS3", "remaining_filament_weight", 
                                     self.remaining_weight)
+            self.database.insert_item("HS3", "used_filament_weight", 
+                                    self.used_weight)
+            self.database.insert_item("HS3", "used_filament_length", 
+                                    self.used_length)
         except Exception as e:
-            logging.warning(f"Failed to sync remaining weight to database: {e}")
+            logging.warning(f"Failed to sync weight/length to database: {e}")
         
         # Reset accumulator
         self.pending_usage_mm = 0.0
@@ -478,8 +526,10 @@ class SpoolTracker:
         return self._weight_to_length(self.remaining_weight)
 
     def get_usage_percentage(self) -> float:
-        """Calculate percentage of filament used (not available without initial weight)."""
-        return 0.0  # Cannot calculate without initial weight
+        """Calculate percentage of filament used based on initial weight."""
+        if self.initial_weight <= 0:
+            return 0.0
+        return (self.used_weight / self.initial_weight) * 100.0
 
     async def _handle_status_request(self, web_request: WebRequest):
         """Handle GET/POST /server/spool_tracker/status requests."""
@@ -583,12 +633,12 @@ class SpoolTracker:
                 "diameter": filament_spec["diameter"],
             },
             "weights": {
-                "initial_weight": 0,  # Not tracked
-                "used_weight": 0,     # Not tracked
+                "initial_weight": self.initial_weight,
+                "used_weight": self.used_weight,
                 "remaining_weight": self.get_remaining_weight(),
             },
             "lengths": {
-                "used_length": 0,     # Not tracked
+                "used_length": self.used_length,
                 "remaining_length": self.get_remaining_length(),
             },
             "usage_percentage": self.get_usage_percentage(),
@@ -695,12 +745,25 @@ class SpoolTracker:
                 
                 old_weight = self.remaining_weight
                 self.remaining_weight = new_weight
+                
+                # Set initial_weight and reset tracking counters when user sets a new weight
+                self.initial_weight = new_weight
+                self.used_weight = 0.0
+                self.used_length = 0.0
+                
                 logging.info(f"Updated remaining weight from {old_weight:.1f}g to {new_weight:.1f}g")
+                logging.info(f"Set initial_weight to {new_weight:.1f}g and reset usage tracking")
                 
                 # Sync to database immediately
                 try:
                     self.database.insert_item("HS3", "remaining_filament_weight", 
                                             new_weight)
+                    self.database.insert_item("HS3", "initial_filament_weight", 
+                                            new_weight)
+                    self.database.insert_item("HS3", "used_filament_weight", 
+                                            0.0)
+                    self.database.insert_item("HS3", "used_filament_length", 
+                                            0.0)
                 except Exception as e:
                     logging.warning(f"Failed to update database: {e}")
                 
@@ -745,6 +808,12 @@ class SpoolTracker:
         try:
             self.database.insert_item("HS3", "remaining_filament_weight", 
                                     self.remaining_weight)
+            self.database.insert_item("HS3", "initial_filament_weight", 
+                                    self.initial_weight)
+            self.database.insert_item("HS3", "used_filament_weight", 
+                                    self.used_weight)
+            self.database.insert_item("HS3", "used_filament_length", 
+                                    self.used_length)
         except Exception as e:
             logging.warning(f"Failed final database sync: {e}")
         
@@ -767,6 +836,10 @@ class SpoolTracker:
         # Log final stats
         if self.remaining_weight > 0:
             logging.info(f"Final remaining weight: {self.remaining_weight:.1f}g")
+        if self.initial_weight > 0:
+            logging.info(f"Final initial weight: {self.initial_weight:.1f}g, "
+                        f"used weight: {self.used_weight:.1f}g, "
+                        f"used length: {self.used_length:.2f}m")
         logging.info(f"Final odometer: X={self.odometer_x:.2f}mm, "
                     f"Y={self.odometer_y:.2f}mm, Z={self.odometer_z:.2f}mm")
         logging.info(f"Final tripmeter: X={self.tripmeter_x:.2f}mm, "
