@@ -876,7 +876,10 @@ class GitRepo:
                 await event_loop.run_in_thread(shutil.rmtree, self.backup_path)
             
             # Backup critical config files before deletion
-            temp_backup_path = self.src_path.parent.joinpath(".config_backup_temp")
+            from datetime import datetime, timezone
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup_base = pathlib.Path("/home/hs3/printer_data/backup")
+            temp_backup_path = backup_base.joinpath(timestamp, "config")
             preserved_files = [
                 self.src_path.joinpath("config", "printer.cfg"),
                 self.src_path.joinpath("config", "features.yml")
@@ -885,7 +888,9 @@ class GitRepo:
             
             if self.src_path.exists():
                 if not temp_backup_path.exists():
-                    await event_loop.run_in_thread(temp_backup_path.mkdir)
+                    await event_loop.run_in_thread(
+                        lambda: temp_backup_path.mkdir(parents=True, exist_ok=True)
+                    )
                 for config_file in preserved_files:
                     if config_file.exists():
                         try:
@@ -895,7 +900,8 @@ class GitRepo:
                             )
                             backed_up_files.append(config_file.name)
                             logging.info(
-                                f"Git Repo {self.alias}: Backed up {config_file.name}"
+                                f"Git Repo {self.alias}: Backed up {config_file.name} "
+                                f"to {backup_base.name}/{timestamp}/config/"
                             )
                         except Exception as e:
                             logging.warning(
@@ -913,9 +919,10 @@ class GitRepo:
             except Exception as e:
                 self.cmd_helper.notify_update_response(
                     f"Git Repo {self.alias}: Git Clone Failed")
-                # Clean up temp backup on clone failure
-                if temp_backup_path.exists():
-                    await event_loop.run_in_thread(shutil.rmtree, temp_backup_path)
+                logging.info(
+                    f"Git Repo {self.alias}: Config backup preserved at "
+                    f"/home/hs3/printer_data/backup/{timestamp}/config/"
+                )
                 raise self.server.error("Git Clone Error") from e
             
             if self.src_path.exists():
@@ -943,15 +950,10 @@ class GitRepo:
                             f"Git Repo {self.alias}: Failed to restore "
                             f"{filename}: {e}"
                         )
-            
-            # Clean up temp backup directory
-            if temp_backup_path.exists():
-                try:
-                    await event_loop.run_in_thread(shutil.rmtree, temp_backup_path)
-                except Exception as e:
-                    logging.warning(
-                        f"Git Repo {self.alias}: Failed to clean up temp backup: {e}"
-                    )
+                logging.info(
+                    f"Git Repo {self.alias}: Config backup preserved at "
+                    f"/home/hs3/printer_data/backup/{timestamp}/config/"
+                )
             
             self.repo_corrupt = False
             self.valid_git_repo = True
