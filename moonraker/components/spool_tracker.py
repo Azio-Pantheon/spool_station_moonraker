@@ -59,12 +59,15 @@ class SpoolTracker:
         # Configuration
         self.sync_rate_seconds = config.getint("sync_rate", default=5, minval=1)
         
-        # Custom filament types (runtime additions)
+        # Custom filament types (runtime additions) - initialize empty dict first
         self.custom_filaments: Dict[str, Dict[str, Any]] = {}
         
-        # Database and shared config references
+        # Database and shared config references - MUST be set before loading custom filaments
         self.database: MoonrakerDatabase = self.server.lookup_component("database")
         self.shared_printer_config = self.server.shared_printer_config
+        
+        # Load custom filaments from database AFTER database reference is initialized
+        self._load_custom_filaments_from_database()
         
         # Initialize filament state from shared config and database
         self._initialize_filament_state()
@@ -74,11 +77,6 @@ class SpoolTracker:
         self._highest_epos: float = 0.0
         self._current_extruder: str = "extruder"
         self._last_known_filament_type: str = self.current_filament_type
-        
-        # Spool usage tracking (initial_weight, used_weight, used_length)
-        self.initial_weight: float = 0.0  # Weight when spool was first set
-        self.used_weight: float = 0.0  # Total weight used from spool
-        self.used_length: float = 0.0  # Total length used in meters
         
         # odometer tracking for X, Y, Z movement
         self.odometer_x: float = 0.0
@@ -230,6 +228,27 @@ class SpoolTracker:
         logging.info(f"tripmeter initialized: X={self.tripmeter_x:.2f}mm, "
                     f"Y={self.tripmeter_y:.2f}mm, Z={self.tripmeter_z:.2f}mm")
 
+    def _load_custom_filaments_from_database(self):
+        """Load custom filament definitions from database."""
+        try:
+            custom_filaments_data = self.database.get_item(
+                "HS3", "custom_filaments", {}
+            ).result()
+            
+            if isinstance(custom_filaments_data, dict):
+                self.custom_filaments = custom_filaments_data
+                if self.custom_filaments:
+                    logging.info(f"Loaded {len(self.custom_filaments)} custom filament(s) from database: "
+                               f"{list(self.custom_filaments.keys())}")
+            else:
+                logging.warning(f"Invalid custom_filaments data in database, expected dict, got {type(custom_filaments_data)}")
+                self.custom_filaments = {}
+                
+        except Exception as e:
+            logging.warning(f"Failed to load custom filaments from database: {e}")
+            self.custom_filaments = {}
+
+
     def _register_notifications(self):
         """Register WebSocket notifications."""
         self.server.register_notification("spool_tracker:usage_updated")
@@ -246,6 +265,11 @@ class SpoolTracker:
             "/server/spool_tracker/filament",
             ["GET", "POST"],
             self._handle_filament_request,
+        )
+        self.server.register_endpoint(
+            "/server/spool_tracker/custom_filament",
+            ["POST"],
+            self._handle_register_custom_filament,
         )
 
     async def component_init(self) -> None:
@@ -369,170 +393,137 @@ class SpoolTracker:
         required_fields = ["density", "diameter"]
         for field in required_fields:
             if field not in specs:
-                raise ValueError(f"Missing required field '{field}' in filament specs")
-            if not isinstance(specs[field], (int, float)) or specs[field] <= 0:
-                raise ValueError(f"Field '{field}' must be a positive number")
+                raise ValueError(f"Missing required field: {field}")
         
-        # Add default name if not provided
-        if "name" not in specs:
-            specs["name"] = f"Custom {filament_type}"
+        # Validate numerical values
+        if specs["density"] <= 0:
+            raise ValueError("Density must be positive")
+        if specs["diameter"] <= 0:
+            raise ValueError("Diameter must be positive")
         
-        self.custom_filaments[filament_type] = specs
-        logging.info(f"Added custom filament type '{filament_type}': {specs}")
-
-    def _length_to_weight(self, length_mm: float) -> float:
-        """Convert filament length to weight using current filament specs."""
+        # Add the filament
+        self.custom_filaments[filament_type] = {
+            "density": specs["density"],
+            "diameter": specs["diameter"],
+            "name": specs.get("name", filament_type)
+        }
+    
+    def _calculate_weight_from_length(self, length_mm: float) -> float:
+        """Calculate filament weight from length using current filament specs."""
         if not self._filament_exists(self.current_filament_type):
             return 0.0
-            
-        filament_spec = self._get_filament_specs(self.current_filament_type)
-        diameter = filament_spec["diameter"]
-        density = filament_spec["density"]
         
-        # Volume calculation: π × (d/2)² × length
-        volume_mm3 = length_mm * math.pi * (diameter / 2) ** 2
-        volume_cm3 = volume_mm3 / 1000  # Convert mm³ to cm³
-        weight_g = density * volume_cm3
+        specs = self._get_filament_specs(self.current_filament_type)
+        density = specs["density"]  # g/cm³
+        diameter = specs["diameter"]  # mm
         
-        return weight_g
-
-    def _weight_to_length(self, weight_g: float) -> float:
-        """Convert filament weight to length using current filament specs."""
-        if not self._filament_exists(self.current_filament_type):
-            return 0.0
-            
-        filament_spec = self._get_filament_specs(self.current_filament_type)
-        diameter = filament_spec["diameter"]
-        density = filament_spec["density"]
+        # Calculate volume in cm³ and convert length from mm to cm
+        radius_cm = (diameter / 2.0) / 10.0
+        length_cm = length_mm / 10.0
+        volume = math.pi * (radius_cm ** 2) * length_cm
         
-        volume_cm3 = weight_g / density
-        volume_mm3 = volume_cm3 * 1000
-        length_mm = volume_mm3 / (math.pi * (diameter / 2) ** 2)
-        
-        return length_mm
+        return density * volume
 
     async def _report_usage(self, eventtime: float) -> float:
-        """Periodic task to process accumulated usage, sync database, and check for filament changes."""
-        
-        # Check for filament type changes from shared config (database updates)
-        try:
-            shared_filament_type = getattr(self.shared_printer_config, 'filament', '') or "N/A"
-            
-            # If shared config filament type differs from our cached type, update it
-            if shared_filament_type != self.current_filament_type:
-                logging.info(f"Detected filament type change from shared config: {self.current_filament_type} -> {shared_filament_type}")
-                old_type = self.current_filament_type
-                self.current_filament_type = shared_filament_type
-                self._last_known_filament_type = shared_filament_type
-                
-                # Send filament change notification if the new filament type is valid
-                if self._filament_exists(shared_filament_type):
-                    self.server.send_event(
-                        "spool_tracker:filament_changed",
-                        {
-                            "old_type": old_type,
-                            "new_type": shared_filament_type,
-                            "new_specs": self._get_filament_specs(shared_filament_type),
-                            "source": "database_sync"  # Indicate this came from database sync
-                        }
-                    )
-                else:
-                    # If new filament type is invalid, disable tracking
-                    self.remaining_weight = 0.0
-                    logging.info(f"Filament type '{shared_filament_type}' is invalid, disabling tracking")
-        except Exception as e:
-            logging.warning(f"Failed to sync filament type from shared config: {e}")
-        
-        # Convert accumulated length to weight
-        weight_used = self._length_to_weight(self.pending_usage_mm)
-        
-        # Update remaining weight
-        self.remaining_weight = max(self.remaining_weight - weight_used, 0.0)
-        
-        # Update used_length (convert mm to meters)
-        if self.pending_usage_mm > 0:
-            self.used_length += self.pending_usage_mm / 1000.0  # Convert mm to meters
-        
-        # Update used_weight (only if we have an initial weight)
-        if self.initial_weight > 0:
-            self.used_weight = self.initial_weight - self.remaining_weight
-        
-        current_time = datetime.now()
-        
-        if self.first_used is None:
-            self.first_used = current_time
-        self.last_used = current_time
-        
-        logging.info(
-            f"Filament usage: +{self.pending_usage_mm:.2f}mm (+{weight_used:.3f}g), "
-            f"Remaining: {self.remaining_weight:.1f}g"
-        )
-        
-        # Send WebSocket notification with current state to prevent desync
-        self.server.send_event(
-            "spool_tracker:usage_updated",
-            {
-                "used_length_mm": self.pending_usage_mm,
-                "used_weight_g": weight_used,
-                "total_used_weight": 0,  # Not tracked anymore, keeping for compatibility
-                "remaining_weight": self.remaining_weight,
-                "filament_type": self.current_filament_type,  # Add current filament type
-                "can_track": self._can_track(),  # Add current tracking capability
-            }
-        )
-        
-        # Sync odometer values to database (always, independent of filament tracking)
-        try:
-            self.database.insert_item("HS3", "odometer_x", self.odometer_x)
-            self.database.insert_item("HS3", "odometer_y", self.odometer_y)
-            self.database.insert_item("HS3", "odometer_z", self.odometer_z)
-        except Exception as e:
-            logging.warning(f"Failed to sync odometer values to database: {e}")
-        
-        # Sync tripmeter values to database (always, independent of filament tracking)
-        try:
-            self.database.insert_item("HS3", "tripmeter_x", self.tripmeter_x)
-            self.database.insert_item("HS3", "tripmeter_y", self.tripmeter_y)
-            self.database.insert_item("HS3", "tripmeter_z", self.tripmeter_z)
-        except Exception as e:
-            logging.warning(f"Failed to sync tripmeter values to database: {e}")
-        
-        # Only process usage if we can track and have pending usage
-        if not self._can_track() or self.pending_usage_mm <= 0:
+        """Periodically report filament usage to logs and sync to database."""
+        if not self._can_track():
+            # Return next timer interval even when not tracking
             return eventtime + self.sync_rate_seconds
-
-        # Sync to database (ignore failures)
+        
+        if self.pending_usage_mm > 0:
+            weight_used = self._calculate_weight_from_length(self.pending_usage_mm)
+            self.used_weight += weight_used
+            self.used_length += self.pending_usage_mm / 1000.0  # Convert mm to meters
+            
+            self.remaining_weight = max(0, self.remaining_weight - weight_used)
+            
+            # Update timestamps
+            if self.first_used is None:
+                self.first_used = datetime.now()
+            self.last_used = datetime.now()
+            
+            logging.debug(f"Consumed {self.pending_usage_mm:.1f}mm ({weight_used:.2f}g), "
+                         f"remaining: {self.remaining_weight:.1f}g")
+            
+            # Emit usage update via WebSocket
+            self.server.send_event(
+                "spool_tracker:usage_updated",
+                {
+                    "used_mm": self.pending_usage_mm,
+                    "used_weight": weight_used,
+                    "total_used_weight": self.used_weight,
+                    "remaining_weight": self.remaining_weight,
+                }
+            )
+            
+            # Reset pending usage accumulator
+            self.pending_usage_mm = 0.0
+        
+        # Sync to database (even if no usage was logged this cycle)
         try:
             self.database.insert_item("HS3", "remaining_filament_weight", 
                                     self.remaining_weight)
+            self.database.insert_item("HS3", "initial_filament_weight", 
+                                    self.initial_weight)
             self.database.insert_item("HS3", "used_filament_weight", 
                                     self.used_weight)
             self.database.insert_item("HS3", "used_filament_length", 
                                     self.used_length)
         except Exception as e:
-            logging.warning(f"Failed to sync weight/length to database: {e}")
+            logging.warning(f"Failed to sync filament usage to database: {e}")
         
-        # Reset accumulator
-        self.pending_usage_mm = 0.0
+        # Sync odometer to database
+        try:
+            self.database.insert_item("HS3", "odometer_x", self.odometer_x)
+            self.database.insert_item("HS3", "odometer_y", self.odometer_y)
+            self.database.insert_item("HS3", "odometer_z", self.odometer_z)
+        except Exception as e:
+            logging.warning(f"Failed to sync odometer to database: {e}")
         
+        # Sync tripmeter to database
+        try:
+            self.database.insert_item("HS3", "tripmeter_x", self.tripmeter_x)
+            self.database.insert_item("HS3", "tripmeter_y", self.tripmeter_y)
+            self.database.insert_item("HS3", "tripmeter_z", self.tripmeter_z)
+        except Exception as e:
+            logging.warning(f"Failed to sync tripmeter to database: {e}")
+        
+        # Return next timer interval
         return eventtime + self.sync_rate_seconds
 
     def get_remaining_weight(self) -> float:
-        """Get remaining filament weight."""
-        return self.remaining_weight
+        """Get current remaining filament weight."""
+        return max(0, self.remaining_weight)
 
     def get_remaining_length(self) -> float:
-        """Calculate remaining filament length."""
-        return self._weight_to_length(self.remaining_weight)
+        """Calculate remaining filament length in meters from weight."""
+        if not self._filament_exists(self.current_filament_type) or self.remaining_weight <= 0:
+            return 0.0
+        
+        specs = self._get_filament_specs(self.current_filament_type)
+        density = specs["density"]  # g/cm³
+        diameter = specs["diameter"]  # mm
+        
+        # Calculate length from weight
+        # weight = density * volume
+        # volume = pi * r^2 * length
+        # length = weight / (density * pi * r^2)
+        
+        radius_cm = (diameter / 2.0) / 10.0
+        area_cm2 = math.pi * (radius_cm ** 2)
+        
+        length_cm = self.remaining_weight / (density * area_cm2)
+        return length_cm / 100.0  # Convert cm to meters
 
     def get_usage_percentage(self) -> float:
-        """Calculate percentage of filament used based on initial weight."""
+        """Calculate percentage of filament used from initial weight."""
         if self.initial_weight <= 0:
             return 0.0
+        
         return (self.used_weight / self.initial_weight) * 100.0
 
     async def _handle_status_request(self, web_request: WebRequest):
-        """Handle GET/POST /server/spool_tracker/status requests."""
+        """Handle status GET/POST requests."""
         
         # Return minimal valid response if component not fully initialized
         if not self._ready:
@@ -540,8 +531,15 @@ class SpoolTracker:
                 "filament_type": "N/A",
                 "filament_name": "Initializing...",
                 "filament_specs": {"density": 0, "diameter": 0},
-                "weights": {"initial_weight": 0, "used_weight": 0, "remaining_weight": 0},
-                "lengths": {"used_length": 0, "remaining_length": 0},
+                "weights": {
+                    "initial_weight": 0.0,
+                    "used_weight": 0.0,
+                    "remaining_weight": 0.0,
+                },
+                "lengths": {
+                    "used_length": 0.0,
+                    "remaining_length": 0.0,
+                },
                 "usage_percentage": 0.0,
                 "pending_usage_mm": 0.0,
                 "can_track": False,
@@ -551,13 +549,13 @@ class SpoolTracker:
                 "tripmeter": {"x": 0.0, "y": 0.0, "z": 0.0},
             }
         
-        # Handle POST requests to modify odometer values
+        # Handle POST updates
         if web_request.get_action() == "POST":
+            # Handle odometer updates (can directly set values)
             odometer_x = web_request.get_float("odometer_x", None)
             odometer_y = web_request.get_float("odometer_y", None)
             odometer_z = web_request.get_float("odometer_z", None)
             
-            # Update odometer values if provided
             if odometer_x is not None:
                 if odometer_x < 0:
                     raise self.server.error("odometer X value must be non-negative")
@@ -799,6 +797,51 @@ class SpoolTracker:
             },
         }
 
+    async def _handle_register_custom_filament(self, web_request: WebRequest):
+        """Handle POST requests to register a custom filament with specs."""
+        
+        # Return error if component not fully initialized
+        if not self._ready:
+            raise self.server.error("Spool Tracker not initialized yet")
+        
+        # Extract required parameters
+        filament_name = web_request.get_str("name")
+        density = web_request.get_float("density")
+        diameter = web_request.get_float("diameter")
+        
+        # Validate parameters
+        if not filament_name:
+            raise self.server.error("Missing required parameter: name")
+        if density <= 0:
+            raise self.server.error("Density must be positive")
+        if diameter <= 0:
+            raise self.server.error("Diameter must be positive")
+        
+        # Register the custom filament
+        self.custom_filaments[filament_name] = {
+            "density": density,
+            "diameter": diameter,
+            "name": filament_name
+        }
+        
+        # Persist custom filaments to database
+        try:
+            self.database.insert_item("HS3", "custom_filaments", self.custom_filaments)
+            logging.info(f"Registered and saved custom filament: {filament_name} "
+                        f"(density={density}g/cm³, diameter={diameter}mm)")
+        except Exception as e:
+            logging.error(f"Failed to save custom filament to database: {e}")
+            # Remove from memory if database save failed
+            del self.custom_filaments[filament_name]
+            raise self.server.error(f"Failed to save custom filament: {e}")
+        
+        # Return success response with the registered filament specs
+        return {
+            "filament_name": filament_name,
+            "specs": self.custom_filaments[filament_name],
+            "registered": True
+        }
+
     async def close(self):
         """Clean shutdown of component."""
         logging.info("Shutting down Spool Tracker")
@@ -832,6 +875,14 @@ class SpoolTracker:
             self.database.insert_item("HS3", "tripmeter_z", self.tripmeter_z)
         except Exception as e:
             logging.warning(f"Failed final tripmeter sync: {e}")
+        
+        # Final custom filaments sync
+        try:
+            if self.custom_filaments:
+                self.database.insert_item("HS3", "custom_filaments", self.custom_filaments)
+                logging.info(f"Saved {len(self.custom_filaments)} custom filament(s) to database")
+        except Exception as e:
+            logging.warning(f"Failed final custom filaments sync: {e}")
         
         # Log final stats
         if self.remaining_weight > 0:
