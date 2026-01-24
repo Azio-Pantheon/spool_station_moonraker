@@ -370,10 +370,20 @@ class SpoolTracker:
                      f"total pending: {self.pending_usage_mm:.3f}mm")
 
     def _can_track(self) -> bool:
-        """Check if tracking is possible (valid filament type and weight > 0)."""
-        return (self._filament_exists(self.current_filament_type) and 
-                self.current_filament_type != "N/A" and 
-                self.remaining_weight > 0)
+        if not self._filament_exists(self.current_filament_type):
+            return False
+        if self.current_filament_type == "N/A":
+            return False
+
+        specs = self._get_filament_specs(self.current_filament_type)
+        if specs.get("density", 0) <= 0:
+            return False
+        if specs.get("diameter", 0) <= 0:
+            return False
+        if self.remaining_weight <= 0:
+            return False
+
+        return True
 
     def _filament_exists(self, filament_type: str) -> bool:
         """Check if filament type exists in predefined or custom types."""
@@ -812,10 +822,10 @@ class SpoolTracker:
         # Validate parameters
         if not filament_name:
             raise self.server.error("Missing required parameter: name")
-        if density <= 0:
-            raise self.server.error("Density must be positive")
-        if diameter <= 0:
-            raise self.server.error("Diameter must be positive")
+        if density is None or density < 0:
+            density = 0.0
+        if diameter is None or diameter < 0:
+            diameter = 0.0
         
         # Register the custom filament
         self.custom_filaments[filament_name] = {
