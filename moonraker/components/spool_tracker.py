@@ -459,10 +459,12 @@ class SpoolTracker:
             self.server.send_event(
                 "spool_tracker:usage_updated",
                 {
-                    "used_mm": self.pending_usage_mm,
-                    "used_weight": weight_used,
-                    "total_used_weight": self.used_weight,
+                    "used_length_mm": self.pending_usage_mm,
+                    "used_weight_g": weight_used,
+                    "total_used_weight": 0,  # Not tracked anymore, keeping for compatibility
                     "remaining_weight": self.remaining_weight,
+                    "filament_type": self.current_filament_type,  # Add current filament type
+                    "can_track": self._can_track(),  # Add current tracking capability
                 }
             )
             
@@ -784,6 +786,8 @@ class SpoolTracker:
                         "new_weight": new_weight,
                         "remaining_weight": self.remaining_weight,
                         "total_used_weight": 0,
+                        "filament_type": self.current_filament_type,  # Add current filament type
+                        "can_track": self._can_track(),  # Add current tracking capability
                     }
                 )
         
