@@ -7,8 +7,12 @@
 from __future__ import annotations
 from ..utils import Sentinel
 from ..common import WebRequest, APITransport, RequestType
-import time
 import asyncio
+from datetime import datetime
+import logging
+import os
+import time
+
 
 
 # Annotation imports
@@ -158,6 +162,11 @@ class KlippyAPI(APITransport):
                 self.shared_printer_config.is_purging = 0
                 asyncio.create_task(self._async_insert_last_print_time(database, self.shared_printer_config.last_print_time))
 
+            # --- Dribble Test ---
+            try:
+                await self._run_dribble_test(default, filament)
+            except Exception as e:
+                logging.warning(f"Dribble test failed (non-blocking): {e}")
 
         params = {'script': script}
         result = await self._send_klippy_request(
@@ -173,6 +182,97 @@ class KlippyAPI(APITransport):
             )
         except Exception as e:
             print(f"Failed to insert last_print_time: {e}")
+
+    async def _run_dribble_test(self, default: Any, filament: str) -> None:
+        CAMERA_URL = "http://localhost:8080/?action=snapshot"
+        CROP_ROI = (510,300,190,450)
+        THRESHOLD = 20
+
+        logging.info("Dribble test: running DRIBBLE macro")
+        await self._send_klippy_request(
+            GCODE_ENDPOINT,
+            {'script': f'DRIBBLE FILAMENT={filament}'},
+            default
+        )
+
+        http_client = self.server.lookup_component("http_client")
+
+        await asyncio.sleep(10)
+        # Take 3 "before" snapshots (2s apart to handle focus changes)
+        before_list = []
+        logging.info("Dribble test: taking 2 'before' snapshots")
+        for i in range(2):
+            resp = await http_client.request("GET", CAMERA_URL)
+            if resp.has_error():
+                raise Exception(f"Failed to fetch before snapshot {i}: {resp.error}")
+            before_list.append(resp.content)
+            if i < 2:
+                await asyncio.sleep(2)
+
+        # Wait 30 seconds for dribble to form
+        logging.info("Dribble test: waiting 30s for dribble to form")
+        await asyncio.sleep(30)
+
+        # Take 3 "after" snapshots (2s apart to handle focus changes)
+        after_list = []
+        logging.info("Dribble test: taking 2 'after' snapshots")
+        for i in range(2):
+            resp = await http_client.request("GET", CAMERA_URL)
+            if resp.has_error():
+                raise Exception(f"Failed to fetch after snapshot {i}: {resp.error}")
+            after_list.append(resp.content)
+            if i < 2:
+                await asyncio.sleep(2)
+
+        # Try all 9 before/after pairs, pick shortest dribble length
+        def _dribble_worker():
+            from .dribble_diff import measure_dribble
+            LOG_DIR = "/home/hs3/printer_data/logs"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tmpdir = os.path.join(LOG_DIR, f"dribble_{timestamp}")
+            os.makedirs(tmpdir, exist_ok=True)
+
+            # Write all snapshots to disk
+            for i, data in enumerate(before_list):
+                with open(os.path.join(tmpdir, f"before_{i}.png"), "wb") as f:
+                    f.write(data)
+            for i, data in enumerate(after_list):
+                with open(os.path.join(tmpdir, f"after_{i}.png"), "wb") as f:
+                    f.write(data)
+
+            # Evaluate all 4 combinations (no output images yet)
+            best_result = None
+            best_pair = (0, 0)
+            for bi in range(2):
+                for ai in range(2):
+                    result = measure_dribble(
+                        before_path=os.path.join(tmpdir, f"before_{bi}.png"),
+                        after_path=os.path.join(tmpdir, f"after_{ai}.png"),
+                        crop_roi=CROP_ROI,
+                        threshold=THRESHOLD,
+                    )
+                    if best_result is None or result.dribble_length_px < best_result.dribble_length_px:
+                        best_result = result
+                        best_pair = (bi, ai)
+
+            # Re-run the best pair with output images
+            best_result = measure_dribble(
+                before_path=os.path.join(tmpdir, f"before_{best_pair[0]}.png"),
+                after_path=os.path.join(tmpdir, f"after_{best_pair[1]}.png"),
+                crop_roi=CROP_ROI,
+                threshold=THRESHOLD,
+                output_dir=tmpdir,
+            )
+            return tmpdir, best_pair, best_result
+
+        tmpdir, best_pair, result = await self.eventloop.run_in_thread(_dribble_worker)
+        logging.info(
+            f"Dribble test: best pair=before_{best_pair[0]}/after_{best_pair[1]}, "
+            f"length={result.dribble_length_px}px, "
+            f"width={result.dribble_width_px}px, "
+            f"area={result.dribble_area_px}px² "
+            f"(images saved to {tmpdir})"
+        )
 
     async def start_print(
         self, filename: str, wait_klippy_started: bool = False
