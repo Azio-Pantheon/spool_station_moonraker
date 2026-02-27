@@ -251,7 +251,7 @@ class KlippyAPI(APITransport):
                         after_path=os.path.join(tmpdir, f"after_{ai}.png"),
                         crop_roi=CROP_ROI,
                         threshold=THRESHOLD,
-                        blur=BLUR,
+                        blur_strength=BLUR,
                     )
                     if best_result is None or result.dribble_length_px < best_result.dribble_length_px:
                         best_result = result
@@ -263,7 +263,7 @@ class KlippyAPI(APITransport):
                 after_path=os.path.join(tmpdir, f"after_{best_pair[1]}.png"),
                 crop_roi=CROP_ROI,
                 threshold=THRESHOLD,
-                blur=BLUR,
+                blur_strength=BLUR,
                 output_dir=tmpdir,
             )
             return tmpdir, best_pair, best_result
