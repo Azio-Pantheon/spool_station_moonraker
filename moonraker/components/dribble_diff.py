@@ -66,6 +66,9 @@ def measure_dribble(
     threshold: int = 30,
     px_per_mm: float = None,
     min_contour_area: int = 50,
+    max_contour_area: int = None,
+    blur_strength: int = 5,
+    nozzle_y: int = None,
     output_dir: str = None,
 ) -> DribbleResult:
     """
@@ -105,9 +108,10 @@ def measure_dribble(
     gray_before = cv2.cvtColor(before, cv2.COLOR_BGR2GRAY)
     gray_after = cv2.cvtColor(after, cv2.COLOR_BGR2GRAY)
 
-    # Blur to reduce noise
-    gray_before = cv2.GaussianBlur(gray_before, (5, 5), 0)
-    gray_after = cv2.GaussianBlur(gray_after, (5, 5), 0)
+    # Blur to reduce noise and mitigate autofocus differences
+    ksize = blur_strength if blur_strength % 2 == 1 else blur_strength + 1
+    gray_before = cv2.GaussianBlur(gray_before, (ksize, ksize), 0)
+    gray_after = cv2.GaussianBlur(gray_after, (ksize, ksize), 0)
 
     # Absolute difference
     diff = cv2.absdiff(gray_before, gray_after)
@@ -115,16 +119,30 @@ def measure_dribble(
     # Threshold
     _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
 
-    # Morphological cleanup — close small gaps, remove noise
+    # Morphological cleanup:
+    # 1. Tall vertical kernel to bridge gaps along the strand.
+    #    This connects the straight part and the hook of a J-shaped dribble
+    #    that might otherwise fragment into separate contours.
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 21))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, vertical_kernel, iterations=1)
+    # 2. Standard cleanup — close remaining small gaps, remove speckle noise
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
     # Find contours
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Filter small contours
-    contours = [c for c in contours if cv2.contourArea(c) >= min_contour_area]
+    # Filter contours by area — reject noise (too small) and focus artifacts (too large)
+    kept = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_contour_area:
+            continue
+        if max_contour_area is not None and area > max_contour_area:
+            continue
+        kept.append(c)
+    contours = kept
 
     if not contours:
         print("No dribble detected — images may be identical or threshold too high.")
@@ -143,11 +161,14 @@ def measure_dribble(
     x, y, w, h = cv2.boundingRect(all_points)
     total_area = sum(cv2.contourArea(c) for c in contours)
 
-    # Nozzle tip = top of the diff region
-    nozzle_tip_y = find_nozzle_tip(mask)
+    # Nozzle tip: use manual position or auto-detect from diff
+    if nozzle_y is not None:
+        nozzle_tip_y = nozzle_y
+    else:
+        nozzle_tip_y = find_nozzle_tip(mask)
 
-    # Dribble length = vertical extent below the nozzle tip
-    dribble_length_px = (y + h) - nozzle_tip_y
+    # Dribble length = vertical extent from nozzle tip to bottom of dribble
+    dribble_length_px = max(0, (y + h) - nozzle_tip_y)
 
     # Convert if calibration available
     dribble_length_mm = dribble_length_px / px_per_mm if px_per_mm else 0.0
@@ -162,21 +183,18 @@ def measure_dribble(
         image_shape=after.shape[:2],
     )
 
-    # === Generate annotated output images ===
+    # === Generate combined output image ===
     if output_dir is not None:
-        # 1. Side-by-side comparison
+        img_h, img_w = before.shape[:2]
+
+        # --- Before | After (comparison row) ---
         comparison = np.hstack([before, after])
         cv2.putText(comparison, "BEFORE", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(comparison, "AFTER", (before.shape[1] + 10, 30),
+        cv2.putText(comparison, "AFTER", (img_w + 10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        cv2.imwrite(os.path.join(output_dir, "dribble_comparison.png"), comparison)
 
-        # 2. Diff visualization
-        diff_color = cv2.cvtColor(diff, cv2.COLOR_GRAY2BGR)
-        cv2.imwrite(os.path.join(output_dir, "dribble_diff_raw.png"), diff_color)
-
-        # 3. Annotated after image with measurements
+        # --- Annotated after image with measurements ---
         annotated = after.copy()
 
         # Draw all contours
@@ -196,16 +214,30 @@ def measure_dribble(
         cv2.putText(annotated, label, (x + w + 5, y + h // 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
-        # Nozzle tip marker
+        # Nozzle tip marker + horizontal line
         cv2.circle(annotated, (center_x, nozzle_tip_y), 5, (0, 255, 255), -1)
         cv2.putText(annotated, "nozzle tip", (center_x + 10, nozzle_tip_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        cv2.line(annotated, (0, nozzle_tip_y), (img_w, nozzle_tip_y),
+                 (0, 255, 255), 1, cv2.LINE_AA)
 
-        cv2.imwrite(os.path.join(output_dir, "dribble_annotated.png"), annotated)
-
-        # 4. Mask output
+        # --- Mask ---
         mask_color = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        cv2.imwrite(os.path.join(output_dir, "dribble_mask.png"), mask_color)
+        cv2.putText(mask_color, "MASK", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 200), 2)
+
+        # --- Annotated | Mask (bottom row) ---
+        cv2.putText(annotated, "ANNOTATED", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+        bottom_row = np.hstack([annotated, mask_color])
+
+        # --- Stack into one image ---
+        combined = np.vstack([comparison, bottom_row])
+        cv2.imwrite(os.path.join(output_dir, "dribble_result.png"), combined)
+
+        # Raw diff for debugging
+        diff_color = cv2.cvtColor(diff, cv2.COLOR_GRAY2BGR)
+        cv2.imwrite(os.path.join(output_dir, "dribble_diff_raw.png"), diff_color)
 
     return result
 
@@ -241,6 +273,13 @@ Examples:
                         help="Diff threshold 0-255 (default: 30)")
     parser.add_argument("--min-area", type=int, default=50,
                         help="Min contour area in px (default: 50)")
+    parser.add_argument("--max-area", type=int, default=None,
+                        help="Max contour area in px — rejects large focus-shift blobs (e.g. 5000)")
+    parser.add_argument("--blur", type=int, default=5,
+                        help="Gaussian blur kernel size — higher absorbs focus differences "
+                             "(default: 5, try 15-25 for autofocus cameras)")
+    parser.add_argument("--nozzle-y", type=int, default=None,
+                        help="Fixed nozzle tip Y in cropped image (skips auto-detect)")
     parser.add_argument("--json", action="store_true",
                         help="Output result as JSON")
 
@@ -255,6 +294,9 @@ Examples:
         threshold=args.threshold,
         px_per_mm=args.px_per_mm,
         min_contour_area=args.min_area,
+        max_contour_area=args.max_area,
+        blur_strength=args.blur,
+        nozzle_y=args.nozzle_y,
         output_dir=".",
     )
 
@@ -278,10 +320,8 @@ Examples:
         print(f"  Image size:      {result.image_shape[1]}x{result.image_shape[0]}")
         print()
         print("Output files:")
-        print("  dribble_comparison.png  — side-by-side before/after")
-        print("  dribble_diff_raw.png    — raw pixel difference")
-        print("  dribble_mask.png        — binary detection mask")
-        print("  dribble_annotated.png   — after image with measurements drawn")
+        print("  dribble_result.png    — 2x2 grid: before|after on top, annotated|mask on bottom")
+        print("  dribble_diff_raw.png  — raw pixel difference (for debugging)")
 
 
 if __name__ == "__main__":

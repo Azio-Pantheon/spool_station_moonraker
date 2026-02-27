@@ -185,8 +185,9 @@ class KlippyAPI(APITransport):
 
     async def _run_dribble_test(self, default: Any, filament: str) -> None:
         CAMERA_URL = "http://localhost:8080/?action=snapshot"
-        CROP_ROI = (510,300,190,450)
+        CROP_ROI = (510,270,190,480)
         THRESHOLD = 20
+        BLUR = 21
 
         logging.info("Dribble test: running DRIBBLE macro")
         await self._send_klippy_request(
@@ -250,6 +251,7 @@ class KlippyAPI(APITransport):
                         after_path=os.path.join(tmpdir, f"after_{ai}.png"),
                         crop_roi=CROP_ROI,
                         threshold=THRESHOLD,
+                        blur=BLUR,
                     )
                     if best_result is None or result.dribble_length_px < best_result.dribble_length_px:
                         best_result = result
@@ -261,6 +263,7 @@ class KlippyAPI(APITransport):
                 after_path=os.path.join(tmpdir, f"after_{best_pair[1]}.png"),
                 crop_roi=CROP_ROI,
                 threshold=THRESHOLD,
+                blur=BLUR,
                 output_dir=tmpdir,
             )
             return tmpdir, best_pair, best_result
