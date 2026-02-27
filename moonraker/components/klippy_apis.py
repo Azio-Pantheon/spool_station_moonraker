@@ -8,9 +8,9 @@ from __future__ import annotations
 from ..utils import Sentinel
 from ..common import WebRequest, APITransport, RequestType
 import asyncio
+from datetime import datetime
 import logging
 import os
-import tempfile
 import time
 
 
@@ -227,7 +227,10 @@ class KlippyAPI(APITransport):
         # Try all 9 before/after pairs, pick shortest dribble length
         def _dribble_worker():
             from .dribble_diff import measure_dribble
-            tmpdir = tempfile.mkdtemp(prefix="dribble_")
+            LOG_DIR = "/home/hs3/printer_data/logs"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tmpdir = os.path.join(LOG_DIR, f"dribble_{timestamp}")
+            os.makedirs(tmpdir, exist_ok=True)
 
             # Write all snapshots to disk
             for i, data in enumerate(before_list):
