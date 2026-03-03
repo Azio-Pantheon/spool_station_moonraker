@@ -544,8 +544,8 @@ class SpoolTracker:
             )
             if nozzle_weight_g is not None:
                 nozzle_weight_kg = nozzle_weight_g / 1000.0
-                self.shared_printer_config.remaining_nozzle_life = max(
-                    0.0, self.shared_printer_config.remaining_nozzle_life - nozzle_weight_kg
+                self.shared_printer_config.remaining_nozzle_life = (
+                    self.shared_printer_config.remaining_nozzle_life - nozzle_weight_kg
                 )
                 logging.debug(
                     f"Nozzle life: consumed {self._pending_nozzle_e_mm:.1f}mm "
