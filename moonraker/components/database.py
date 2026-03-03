@@ -206,6 +206,7 @@ class MoonrakerDatabase:
             "nozzle_size":         ("nozzle",              str,   ""),
             "nozzle_type":         ("nozzle_type",         str,   ""),
             "nozzle_life":         ("nozzle_life",         float, 0.0),
+            "remaining_nozzle_life": ("remaining_nozzle_life", float, 0.0),
             "wet_filament_purge":  ("wet_filament_purge",  int,   0),
             "last_print_time":     ("last_print_time",     float, 0.0),
             "is_purging":          ("is_purging",          int,   0),
@@ -849,6 +850,8 @@ class MoonrakerDatabase:
                     self.shared_printer_config.nozzle_type = val['nozzle_type']
                 if 'nozzle_life' in val:
                     self.shared_printer_config.nozzle_life = float(val['nozzle_life'])
+                if 'remaining_nozzle_life' in val:
+                    self.shared_printer_config.remaining_nozzle_life = float(val['remaining_nozzle_life'])
                 if 'wet_filament_purge' in val:
                     self.shared_printer_config.wet_filament_purge = int(val['wet_filament_purge'])
                 if 'last_print_time' in val:
@@ -869,6 +872,8 @@ class MoonrakerDatabase:
                     self.shared_printer_config.nozzle_type = val
                 elif key == 'nozzle_life':
                     self.shared_printer_config.nozzle_life = float(val)
+                elif key == 'remaining_nozzle_life':
+                    self.shared_printer_config.remaining_nozzle_life = float(val)
                 elif key == 'wet_filament_purge':
                     self.shared_printer_config.wet_filament_purge = int(val)
                 elif key == 'last_print_time':

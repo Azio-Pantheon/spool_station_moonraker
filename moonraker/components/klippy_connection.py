@@ -565,7 +565,8 @@ class KlippyConnection:
                 "wet_filament_purge": self.shared_printer_config.wet_filament_purge,
                 "last_print_time": self.shared_printer_config.last_print_time,
                 "nozzle_type": self.shared_printer_config.nozzle_type,
-                "nozzle_life": self.shared_printer_config.nozzle_life
+                "nozzle_life": self.shared_printer_config.nozzle_life,
+                "remaining_nozzle_life": self.shared_printer_config.remaining_nozzle_life
             })
 
             # Ensure that "toolhead" exists in the status dictionary

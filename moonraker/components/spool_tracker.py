@@ -74,9 +74,13 @@ class SpoolTracker:
         
         # Usage tracking
         self.pending_usage_mm = 0.0  # Accumulated extrusion in mm
+        self._pending_nozzle_e_mm = 0.0  # Forward extrusion for nozzle life (always active)
         self._highest_epos: float = 0.0
         self._current_extruder: str = "extruder"
         self._last_known_filament_type: str = self.current_filament_type
+        
+        # Nozzle life tracking delegated to shared_printer_config (authoritative source)
+        self._initialize_nozzle_life_state()
         
         # odometer tracking for X, Y, Z, E movement
         self.odometer_x: float = 0.0
@@ -249,6 +253,14 @@ class SpoolTracker:
                     f"Y={self.tripmeter_y:.2f}mm, Z={self.tripmeter_z:.2f}mm, "
                     f"E={self.tripmeter_e:.2f}mm")
 
+    def _initialize_nozzle_life_state(self):
+        """Log nozzle life values already loaded into shared_printer_config by database.py."""
+        logging.info(
+            f"Nozzle life initialized: "
+            f"total={self.shared_printer_config.nozzle_life:.3f}kg, "
+            f"remaining={self.shared_printer_config.remaining_nozzle_life:.3f}kg"
+        )
+
     def _load_custom_filaments_from_database(self):
         """Load custom filament definitions from database."""
         try:
@@ -373,22 +385,21 @@ class SpoolTracker:
         if e_pos is not None:
             self._last_e_pos = e_pos
         
-        # Only track filament if we have valid filament type and weight
-        if not self._can_track():
-            return
-
-        epos: float = position[3] if position[3] is not None else self._highest_epos
+        # Track forward E extrusion and extruder changes (always active)
+        epos: float = e_pos if e_pos is not None else self._highest_epos
         extr = toolhead.get("extruder", self._current_extruder)
         
-        # Handle extruder changes
         if extr != self._current_extruder:
             self._highest_epos = epos
             self._current_extruder = extr
             logging.debug(f"Switched to extruder: {extr}")
         elif epos > self._highest_epos:
-            # Calculate extrusion length
             extrusion_length = epos - self._highest_epos
-            self._add_extrusion(extrusion_length)
+            # Always accumulate for nozzle life tracking
+            self._pending_nozzle_e_mm += extrusion_length
+            # Only accumulate for filament usage if tracking is active
+            if self._can_track():
+                self._add_extrusion(extrusion_length)
             self._highest_epos = epos
 
     def _add_extrusion(self, length_mm: float) -> None:
@@ -462,13 +473,40 @@ class SpoolTracker:
         
         return density * volume
 
+    def _calculate_weight_for_nozzle(self, length_mm: float) -> Optional[float]:
+        """Calculate filament weight from length for nozzle life tracking.
+        
+        Returns weight in grams, or None if filament specs are missing.
+        """
+        if not self._filament_exists(self.current_filament_type):
+            logging.debug("Skipping nozzle life update: no valid filament type")
+            return None
+        
+        if self.current_filament_type == "N/A":
+            logging.debug("Skipping nozzle life update: filament type is N/A")
+            return None
+        
+        specs = self._get_filament_specs(self.current_filament_type)
+        density = specs.get("density", 0)
+        diameter = specs.get("diameter", 0)
+        
+        if density <= 0:
+            logging.debug("Skipping nozzle life update: filament density is missing or zero")
+            return None
+        if diameter <= 0:
+            logging.debug("Skipping nozzle life update: filament diameter is missing or zero")
+            return None
+        
+        radius_cm = (diameter / 2.0) / 10.0
+        length_cm = length_mm / 10.0
+        volume = math.pi * (radius_cm ** 2) * length_cm
+        return density * volume
+
     async def _report_usage(self, eventtime: float) -> float:
         """Periodically report filament usage to logs and sync to database."""
-        if not self._can_track():
-            # Return next timer interval even when not tracking
-            return eventtime + self.sync_rate_seconds
         
-        if self.pending_usage_mm > 0:
+        # Filament usage tracking (only when filament tracking is active)
+        if self._can_track() and self.pending_usage_mm > 0:
             weight_used = self._calculate_weight_from_length(self.pending_usage_mm)
             self.used_weight += weight_used
             self.used_length += self.pending_usage_mm / 1000.0  # Convert mm to meters
@@ -498,6 +536,23 @@ class SpoolTracker:
             
             # Reset pending usage accumulator
             self.pending_usage_mm = 0.0
+        
+        # Nozzle life tracking (always active, independent of filament weight tracking)
+        if self._pending_nozzle_e_mm > 0:
+            nozzle_weight_g = self._calculate_weight_for_nozzle(
+                self._pending_nozzle_e_mm
+            )
+            if nozzle_weight_g is not None:
+                nozzle_weight_kg = nozzle_weight_g / 1000.0
+                self.shared_printer_config.remaining_nozzle_life = max(
+                    0.0, self.shared_printer_config.remaining_nozzle_life - nozzle_weight_kg
+                )
+                logging.debug(
+                    f"Nozzle life: consumed {self._pending_nozzle_e_mm:.1f}mm "
+                    f"({nozzle_weight_g:.2f}g / {nozzle_weight_kg:.4f}kg), "
+                    f"remaining: {self.shared_printer_config.remaining_nozzle_life:.3f}kg"
+                )
+            self._pending_nozzle_e_mm = 0.0
         
         # Sync to database (even if no usage was logged this cycle)
         try:
@@ -529,6 +584,18 @@ class SpoolTracker:
             self.database.insert_item("HS3", "tripmeter_e", self.tripmeter_e)
         except Exception as e:
             logging.warning(f"Failed to sync tripmeter to database: {e}")
+        
+        # Sync nozzle life to database
+        try:
+            self.database.insert_item(
+                "HS3", "nozzle_life", self.shared_printer_config.nozzle_life
+            )
+            self.database.insert_item(
+                "HS3", "remaining_nozzle_life",
+                self.shared_printer_config.remaining_nozzle_life
+            )
+        except Exception as e:
+            logging.warning(f"Failed to sync nozzle life to database: {e}")
         
         # Return next timer interval
         return eventtime + self.sync_rate_seconds
@@ -589,6 +656,8 @@ class SpoolTracker:
                 "available_filaments": {"predefined": [], "custom": [], "all": []},
                 "odometer": {"x": 0.0, "y": 0.0, "z": 0.0, "e": 0.0},
                 "tripmeter": {"x": 0.0, "y": 0.0, "z": 0.0, "e": 0.0},
+                "nozzle_life": 0.0,
+                "remaining_nozzle_life": 0.0,
             }
         
         # Handle POST updates
@@ -676,6 +745,46 @@ class SpoolTracker:
                     self.database.insert_item("HS3", "tripmeter_e", 0.0)
                 except Exception as e:
                     logging.warning(f"Failed to reset tripmeter_e in database: {e}")
+            
+            # Handle nozzle life setting (sets both nozzle_life and remaining_nozzle_life)
+            new_nozzle_life = web_request.get_float("nozzle_life", None)
+            if new_nozzle_life is not None:
+                if new_nozzle_life < 0:
+                    raise self.server.error("nozzle_life must be non-negative")
+                old_nozzle_life = self.shared_printer_config.nozzle_life
+                self.shared_printer_config.nozzle_life = new_nozzle_life
+                self.shared_printer_config.remaining_nozzle_life = new_nozzle_life
+                logging.info(f"Set nozzle_life to {new_nozzle_life:.3f}kg "
+                           f"(was {old_nozzle_life:.3f}kg), "
+                           f"remaining_nozzle_life reset to {new_nozzle_life:.3f}kg")
+                try:
+                    self.database.insert_item("HS3", "nozzle_life", new_nozzle_life)
+                    self.database.insert_item("HS3", "remaining_nozzle_life",
+                                            new_nozzle_life)
+                except Exception as e:
+                    logging.warning(f"Failed to update nozzle_life in database: {e}")
+
+            # Handle remaining nozzle life reset (resets back to nozzle_life value)
+            reset_remaining_nozzle_life = web_request.get_boolean(
+                "reset_remaining_nozzle_life", False
+            )
+            if reset_remaining_nozzle_life:
+                self.shared_printer_config.remaining_nozzle_life = (
+                    self.shared_printer_config.nozzle_life
+                )
+                logging.info(
+                    f"Reset remaining_nozzle_life to "
+                    f"{self.shared_printer_config.nozzle_life:.3f}kg"
+                )
+                try:
+                    self.database.insert_item(
+                        "HS3", "remaining_nozzle_life",
+                        self.shared_printer_config.nozzle_life
+                    )
+                except Exception as e:
+                    logging.warning(
+                        f"Failed to reset remaining_nozzle_life in database: {e}"
+                    )
         
         # Return current status (for both GET and POST)
         if not self._filament_exists(self.current_filament_type):
@@ -725,6 +834,8 @@ class SpoolTracker:
                 "z": self.tripmeter_z,
                 "e": self.tripmeter_e,
             },
+            "nozzle_life": self.shared_printer_config.nozzle_life,
+            "remaining_nozzle_life": self.shared_printer_config.remaining_nozzle_life,
         }
 
     async def _handle_filament_request(self, web_request: WebRequest):
@@ -944,6 +1055,18 @@ class SpoolTracker:
         except Exception as e:
             logging.warning(f"Failed final tripmeter sync: {e}")
         
+        # Final nozzle life sync
+        try:
+            self.database.insert_item(
+                "HS3", "nozzle_life", self.shared_printer_config.nozzle_life
+            )
+            self.database.insert_item(
+                "HS3", "remaining_nozzle_life",
+                self.shared_printer_config.remaining_nozzle_life
+            )
+        except Exception as e:
+            logging.warning(f"Failed final nozzle life sync: {e}")
+        
         # Final custom filaments sync
         try:
             if self.custom_filaments:
@@ -965,6 +1088,10 @@ class SpoolTracker:
         logging.info(f"Final tripmeter: X={self.tripmeter_x:.2f}mm, "
                     f"Y={self.tripmeter_y:.2f}mm, Z={self.tripmeter_z:.2f}mm, "
                     f"E={self.tripmeter_e:.2f}mm")
+        logging.info(
+            f"Final nozzle life: total={self.shared_printer_config.nozzle_life:.3f}kg, "
+            f"remaining={self.shared_printer_config.remaining_nozzle_life:.3f}kg"
+        )
 
 
 def load_component(config: ConfigHelper) -> SpoolTracker:
