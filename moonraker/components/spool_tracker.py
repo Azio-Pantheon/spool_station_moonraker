@@ -78,19 +78,22 @@ class SpoolTracker:
         self._current_extruder: str = "extruder"
         self._last_known_filament_type: str = self.current_filament_type
         
-        # odometer tracking for X, Y, Z movement
+        # odometer tracking for X, Y, Z, E movement
         self.odometer_x: float = 0.0
         self.odometer_y: float = 0.0
         self.odometer_z: float = 0.0
+        self.odometer_e: float = 0.0
         self._last_x_pos: Optional[float] = None
         self._last_y_pos: Optional[float] = None
         self._last_z_pos: Optional[float] = None
+        self._last_e_pos: Optional[float] = None
         self._initialize_odometer_state()
         
-        # tripmeter tracking for X, Y, Z movement (resettable)
+        # tripmeter tracking for X, Y, Z, E movement (resettable)
         self.tripmeter_x: float = 0.0
         self.tripmeter_y: float = 0.0
         self.tripmeter_z: float = 0.0
+        self.tripmeter_e: float = 0.0
         self._initialize_tripmeter_state()
         
         # Timer for periodic reporting and database sync
@@ -196,8 +199,17 @@ class SpoolTracker:
             logging.warning(f"Failed to load odometer_z from database: {e}")
             self.odometer_z = 0.0
         
+        try:
+            self.odometer_e = float(self.database.get_item(
+                "HS3", "odometer_e", 0.0
+            ).result())
+        except Exception as e:
+            logging.warning(f"Failed to load odometer_e from database: {e}")
+            self.odometer_e = 0.0
+        
         logging.info(f"odometer initialized: X={self.odometer_x:.2f}mm, "
-                    f"Y={self.odometer_y:.2f}mm, Z={self.odometer_z:.2f}mm")
+                    f"Y={self.odometer_y:.2f}mm, Z={self.odometer_z:.2f}mm, "
+                    f"E={self.odometer_e:.2f}mm")
 
     def _initialize_tripmeter_state(self):
         """Initialize tripmeter X, Y, Z values from database."""
@@ -225,8 +237,17 @@ class SpoolTracker:
             logging.warning(f"Failed to load tripmeter_z from database: {e}")
             self.tripmeter_z = 0.0
         
+        try:
+            self.tripmeter_e = float(self.database.get_item(
+                "HS3", "tripmeter_e", 0.0
+            ).result())
+        except Exception as e:
+            logging.warning(f"Failed to load tripmeter_e from database: {e}")
+            self.tripmeter_e = 0.0
+        
         logging.info(f"tripmeter initialized: X={self.tripmeter_x:.2f}mm, "
-                    f"Y={self.tripmeter_y:.2f}mm, Z={self.tripmeter_z:.2f}mm")
+                    f"Y={self.tripmeter_y:.2f}mm, Z={self.tripmeter_z:.2f}mm, "
+                    f"E={self.tripmeter_e:.2f}mm")
 
     def _load_custom_filaments_from_database(self):
         """Load custom filament definitions from database."""
@@ -294,10 +315,11 @@ class SpoolTracker:
             self._current_extruder = toolhead.get("extruder", "extruder")
             position = toolhead.get("position", [None, None, None, None])
             
-            # Initialize X, Y, Z positions for odometer tracking
+            # Initialize X, Y, Z, E positions for odometer tracking
             self._last_x_pos = position[0]
             self._last_y_pos = position[1]
             self._last_z_pos = position[2]
+            self._last_e_pos = position[3]
             initial_e_pos = position[3]
             
             logging.debug(f"Initial position: X={self._last_x_pos}, Y={self._last_y_pos}, "
@@ -321,8 +343,8 @@ class SpoolTracker:
         
         position = toolhead.get("position", [None, None, None, None])
         
-        # Track X, Y, Z movement for odometer (always track, independent of filament)
-        x_pos, y_pos, z_pos = position[0], position[1], position[2]
+        # Track X, Y, Z, E movement for odometer (always track, independent of filament)
+        x_pos, y_pos, z_pos, e_pos = position[0], position[1], position[2], position[3]
         
         if x_pos is not None and self._last_x_pos is not None:
             delta_x = abs(x_pos - self._last_x_pos)
@@ -336,6 +358,10 @@ class SpoolTracker:
             delta_z = abs(z_pos - self._last_z_pos)
             self.odometer_z += delta_z
             self.tripmeter_z += delta_z
+        if e_pos is not None and self._last_e_pos is not None:
+            delta_e = abs(e_pos - self._last_e_pos)
+            self.odometer_e += delta_e
+            self.tripmeter_e += delta_e
         
         # Update last positions
         if x_pos is not None:
@@ -344,6 +370,8 @@ class SpoolTracker:
             self._last_y_pos = y_pos
         if z_pos is not None:
             self._last_z_pos = z_pos
+        if e_pos is not None:
+            self._last_e_pos = e_pos
         
         # Only track filament if we have valid filament type and weight
         if not self._can_track():
@@ -489,6 +517,7 @@ class SpoolTracker:
             self.database.insert_item("HS3", "odometer_x", self.odometer_x)
             self.database.insert_item("HS3", "odometer_y", self.odometer_y)
             self.database.insert_item("HS3", "odometer_z", self.odometer_z)
+            self.database.insert_item("HS3", "odometer_e", self.odometer_e)
         except Exception as e:
             logging.warning(f"Failed to sync odometer to database: {e}")
         
@@ -497,6 +526,7 @@ class SpoolTracker:
             self.database.insert_item("HS3", "tripmeter_x", self.tripmeter_x)
             self.database.insert_item("HS3", "tripmeter_y", self.tripmeter_y)
             self.database.insert_item("HS3", "tripmeter_z", self.tripmeter_z)
+            self.database.insert_item("HS3", "tripmeter_e", self.tripmeter_e)
         except Exception as e:
             logging.warning(f"Failed to sync tripmeter to database: {e}")
         
@@ -557,8 +587,8 @@ class SpoolTracker:
                 "can_track": False,
                 "timestamps": {"first_used": None, "last_used": None},
                 "available_filaments": {"predefined": [], "custom": [], "all": []},
-                "odometer": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "tripmeter": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "odometer": {"x": 0.0, "y": 0.0, "z": 0.0, "e": 0.0},
+                "tripmeter": {"x": 0.0, "y": 0.0, "z": 0.0, "e": 0.0},
             }
         
         # Handle POST updates
@@ -598,10 +628,22 @@ class SpoolTracker:
                 except Exception as e:
                     logging.warning(f"Failed to update odometer_z in database: {e}")
             
+            odometer_e = web_request.get_float("odometer_e", None)
+            if odometer_e is not None:
+                if odometer_e < 0:
+                    raise self.server.error("odometer E value must be non-negative")
+                self.odometer_e = odometer_e
+                logging.info(f"Updated odometer_e to {odometer_e:.2f}mm")
+                try:
+                    self.database.insert_item("HS3", "odometer_e", odometer_e)
+                except Exception as e:
+                    logging.warning(f"Failed to update odometer_e in database: {e}")
+            
             # Handle tripmeter reset (only accepts reset to 0)
             reset_tripmeter_x = web_request.get_boolean("reset_tripmeter_x", False)
             reset_tripmeter_y = web_request.get_boolean("reset_tripmeter_y", False)
             reset_tripmeter_z = web_request.get_boolean("reset_tripmeter_z", False)
+            reset_tripmeter_e = web_request.get_boolean("reset_tripmeter_e", False)
             
             if reset_tripmeter_x:
                 self.tripmeter_x = 0.0
@@ -626,6 +668,14 @@ class SpoolTracker:
                     self.database.insert_item("HS3", "tripmeter_z", 0.0)
                 except Exception as e:
                     logging.warning(f"Failed to reset tripmeter_z in database: {e}")
+            
+            if reset_tripmeter_e:
+                self.tripmeter_e = 0.0
+                logging.info("Reset tripmeter_e to 0.0mm")
+                try:
+                    self.database.insert_item("HS3", "tripmeter_e", 0.0)
+                except Exception as e:
+                    logging.warning(f"Failed to reset tripmeter_e in database: {e}")
         
         # Return current status (for both GET and POST)
         if not self._filament_exists(self.current_filament_type):
@@ -667,11 +717,13 @@ class SpoolTracker:
                 "x": self.odometer_x,
                 "y": self.odometer_y,
                 "z": self.odometer_z,
+                "e": self.odometer_e,
             },
             "tripmeter": {
                 "x": self.tripmeter_x,
                 "y": self.tripmeter_y,
                 "z": self.tripmeter_z,
+                "e": self.tripmeter_e,
             },
         }
 
@@ -879,6 +931,7 @@ class SpoolTracker:
             self.database.insert_item("HS3", "odometer_x", self.odometer_x)
             self.database.insert_item("HS3", "odometer_y", self.odometer_y)
             self.database.insert_item("HS3", "odometer_z", self.odometer_z)
+            self.database.insert_item("HS3", "odometer_e", self.odometer_e)
         except Exception as e:
             logging.warning(f"Failed final odometer sync: {e}")
         
@@ -887,6 +940,7 @@ class SpoolTracker:
             self.database.insert_item("HS3", "tripmeter_x", self.tripmeter_x)
             self.database.insert_item("HS3", "tripmeter_y", self.tripmeter_y)
             self.database.insert_item("HS3", "tripmeter_z", self.tripmeter_z)
+            self.database.insert_item("HS3", "tripmeter_e", self.tripmeter_e)
         except Exception as e:
             logging.warning(f"Failed final tripmeter sync: {e}")
         
@@ -906,9 +960,11 @@ class SpoolTracker:
                         f"used weight: {self.used_weight:.1f}g, "
                         f"used length: {self.used_length:.2f}m")
         logging.info(f"Final odometer: X={self.odometer_x:.2f}mm, "
-                    f"Y={self.odometer_y:.2f}mm, Z={self.odometer_z:.2f}mm")
+                    f"Y={self.odometer_y:.2f}mm, Z={self.odometer_z:.2f}mm, "
+                    f"E={self.odometer_e:.2f}mm")
         logging.info(f"Final tripmeter: X={self.tripmeter_x:.2f}mm, "
-                    f"Y={self.tripmeter_y:.2f}mm, Z={self.tripmeter_z:.2f}mm")
+                    f"Y={self.tripmeter_y:.2f}mm, Z={self.tripmeter_z:.2f}mm, "
+                    f"E={self.tripmeter_e:.2f}mm")
 
 
 def load_component(config: ConfigHelper) -> SpoolTracker:
