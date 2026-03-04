@@ -559,6 +559,7 @@ class KlippyConnection:
             status.setdefault("toolhead", {})
 
             # Update the toolhead section with filament and nozzle information
+            spool_tracker = self.server.lookup_component('spool_tracker', None)
             status["toolhead"].update({
                 "filament_type": self.shared_printer_config.filament,
                 "nozzle_size": self.shared_printer_config.nozzle,
@@ -566,7 +567,19 @@ class KlippyConnection:
                 "last_print_time": self.shared_printer_config.last_print_time,
                 "nozzle_type": self.shared_printer_config.nozzle_type,
                 "nozzle_life": self.shared_printer_config.nozzle_life,
-                "remaining_nozzle_life": self.shared_printer_config.remaining_nozzle_life
+                "remaining_nozzle_life": self.shared_printer_config.remaining_nozzle_life,
+                "odometer": {
+                    "x": spool_tracker.odometer_x if spool_tracker else 0.0,
+                    "y": spool_tracker.odometer_y if spool_tracker else 0.0,
+                    "z": spool_tracker.odometer_z if spool_tracker else 0.0,
+                    "e": spool_tracker.odometer_e if spool_tracker else 0.0,
+                },
+                "tripmeter": {
+                    "x": spool_tracker.tripmeter_x if spool_tracker else 0.0,
+                    "y": spool_tracker.tripmeter_y if spool_tracker else 0.0,
+                    "z": spool_tracker.tripmeter_z if spool_tracker else 0.0,
+                    "e": spool_tracker.tripmeter_e if spool_tracker else 0.0,
+                },
             })
 
             # Ensure that "toolhead" exists in the status dictionary
