@@ -162,11 +162,11 @@ class KlippyAPI(APITransport):
                 self.shared_printer_config.is_purging = 0
                 asyncio.create_task(self._async_insert_last_print_time(database, self.shared_printer_config.last_print_time))
 
-            # --- Dribble Test ---
-            try:
-                await self._run_dribble_test(default, filament)
-            except Exception as e:
-                logging.warning(f"Dribble test failed (non-blocking): {e}")
+            # --- Dribble Test (disabled) ---
+            # try:
+            #     await self._run_dribble_test(default, filament)
+            # except Exception as e:
+            #     logging.warning(f"Dribble test failed (non-blocking): {e}")
 
         params = {'script': script}
         result = await self._send_klippy_request(
