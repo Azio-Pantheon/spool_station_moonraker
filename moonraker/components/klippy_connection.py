@@ -562,6 +562,7 @@ class KlippyConnection:
             spool_tracker = self.server.lookup_component('spool_tracker', None)
             status["toolhead"].update({
                 "filament_type": self.shared_printer_config.filament,
+                "spool_qr_code": spool_tracker.spool_qr_code if spool_tracker else "",
                 "nozzle_size": self.shared_printer_config.nozzle,
                 "wet_filament_purge": self.shared_printer_config.wet_filament_purge,
                 "last_print_time": self.shared_printer_config.last_print_time,

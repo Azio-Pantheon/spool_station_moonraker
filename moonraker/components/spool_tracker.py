@@ -171,10 +171,20 @@ class SpoolTracker:
             logging.warning(f"Failed to load used filament length from database: {e}")
             self.used_length = 0.0
         
+        # Load spool QR code from database
+        try:
+            spool_qr_code = self.database.get_item(
+                "HS3", "spool_qr_code", ""
+            ).result()
+            self.spool_qr_code = str(spool_qr_code) if spool_qr_code else ""
+        except Exception:
+            self.spool_qr_code = ""
+
         # If filament type is invalid or N/A, stop tracking
         if not self._filament_exists(self.current_filament_type) or self.current_filament_type == "N/A":
             self.current_filament_type = "N/A"
             self.remaining_weight = 0.0
+            self.spool_qr_code = ""
             logging.info("Spool Tracker: Invalid or missing filament type, tracking disabled")
 
     def _initialize_odometer_state(self):
@@ -529,8 +539,9 @@ class SpoolTracker:
                     "used_weight_g": weight_used,
                     "total_used_weight": 0,  # Not tracked anymore, keeping for compatibility
                     "remaining_weight": self.remaining_weight,
-                    "filament_type": self.current_filament_type,  # Add current filament type
-                    "can_track": self._can_track(),  # Add current tracking capability
+                    "filament_type": self.current_filament_type,
+                    "can_track": self._can_track(),
+                    "spool_qr_code": self.spool_qr_code,
                 }
             )
             
@@ -562,11 +573,13 @@ class SpoolTracker:
                                     self.initial_weight)
             self.database.insert_item("HS3", "used_filament_weight", 
                                     self.used_weight)
-            self.database.insert_item("HS3", "used_filament_length", 
+            self.database.insert_item("HS3", "used_filament_length",
                                     self.used_length)
+            self.database.insert_item("HS3", "spool_qr_code",
+                                    self.spool_qr_code)
         except Exception as e:
             logging.warning(f"Failed to sync filament usage to database: {e}")
-        
+
         # Sync odometer to database
         try:
             self.database.insert_item("HS3", "odometer_x", self.odometer_x)
@@ -813,6 +826,7 @@ class SpoolTracker:
             "usage_percentage": self.get_usage_percentage(),
             "pending_usage_mm": self.pending_usage_mm,
             "can_track": self._can_track(),
+            "spool_qr_code": self.spool_qr_code,
             "timestamps": {
                 "first_used": self.first_used.isoformat() if self.first_used else None,
                 "last_used": self.last_used.isoformat() if self.last_used else None,
@@ -848,6 +862,7 @@ class SpoolTracker:
                 "filament_specs": {"density": 0, "diameter": 0, "name": "Initializing..."},
                 "remaining_weight": 0.0,
                 "can_track": False,
+                "spool_qr_code": "",
                 "available_types": {"predefined": [], "custom": [], "all": []},
             }
         
@@ -855,6 +870,7 @@ class SpoolTracker:
             # Extract both filament type and weight from request
             new_type = web_request.get_str("filament_type", None)
             new_weight = web_request.get_float("weight", None)
+            new_qr_code = web_request.get_str("qr_code", None)
             
             # If only weight is provided (no filament type), sync filament type from shared config first
             if new_weight is not None and new_type is None:
@@ -877,6 +893,7 @@ class SpoolTracker:
                                     "old_type": old_type,
                                     "new_type": shared_filament_type,
                                     "new_specs": self._get_filament_specs(shared_filament_type),
+                                    "spool_qr_code": self.spool_qr_code,
                                 }
                             )
                 except Exception as e:
@@ -908,9 +925,29 @@ class SpoolTracker:
                         "old_type": old_type,
                         "new_type": new_type,
                         "new_specs": self._get_filament_specs(new_type),
+                        "spool_qr_code": self.spool_qr_code,
                     }
                 )
-            
+
+            # Handle spool QR code
+            if new_qr_code is not None:
+                # Explicit QR code provided — set it
+                self.spool_qr_code = new_qr_code
+                logging.info(f"Spool QR code set to: {new_qr_code}")
+            elif new_type is not None:
+                # Filament type changed without QR code — clear it (manual workflow)
+                self.spool_qr_code = ""
+                logging.info("Spool QR code cleared (manual filament change)")
+            # If only weight updated (no new_type, no new_qr_code) — leave qr_code unchanged
+
+            # Persist QR code and sync to shared config
+            if new_qr_code is not None or new_type is not None:
+                try:
+                    self.database.insert_item("HS3", "spool_qr_code", self.spool_qr_code)
+                except Exception as e:
+                    logging.warning(f"Failed to persist spool_qr_code: {e}")
+                self.shared_printer_config.spool_qr_code = self.spool_qr_code
+
             # Handle weight change
             if new_weight is not None:
                 if new_weight < 0:
@@ -949,8 +986,9 @@ class SpoolTracker:
                         "new_weight": new_weight,
                         "remaining_weight": self.remaining_weight,
                         "total_used_weight": 0,
-                        "filament_type": self.current_filament_type,  # Add current filament type
-                        "can_track": self._can_track(),  # Add current tracking capability
+                        "filament_type": self.current_filament_type,
+                        "can_track": self._can_track(),
+                        "spool_qr_code": self.spool_qr_code,
                     }
                 )
         
@@ -967,6 +1005,7 @@ class SpoolTracker:
             "filament_specs": filament_specs,
             "remaining_weight": self.remaining_weight,
             "can_track": self._can_track(),
+            "spool_qr_code": self.spool_qr_code,
             "available_types": {
                 "predefined": list(FILAMENT_TYPES.keys()),
                 "custom": list(self.custom_filaments.keys()),

@@ -211,6 +211,7 @@ class MoonrakerDatabase:
             "last_print_time":     ("last_print_time",     float, 0.0),
             "is_purging":          ("is_purging",          int,   0),
             "enable_prime":        ("enable_prime",        int,   0),
+            "spool_qr_code":       ("spool_qr_code",       str,   ""),
         }
 
         def _coerce(value, typ, default):
