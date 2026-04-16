@@ -45,10 +45,10 @@ class FleetIntegration:
         fleet_url = fleet_url.rstrip("/")
         self.fleet_url = fleet_url
         import socket as _socket
-        default_hostname = _socket.gethostname()
+        default_hostname = _socket.gethostname().lower()
         self.printer_hostname = config.get(
             "printer_hostname", default_hostname
-        )
+        ).lower()
         self.poll_interval = config.getint("poll_interval", default=300)
         self.download_timeout = config.getint("download_timeout", default=600)
 
@@ -72,6 +72,10 @@ class FleetIntegration:
         self.server.register_endpoint(
             "/server/fleet/download_and_print", RequestType.POST,
             self._handle_download_and_print
+        )
+        self.server.register_endpoint(
+            "/server/fleet/download_file", RequestType.POST,
+            self._handle_download_only
         )
 
         # Register notifications
@@ -315,10 +319,64 @@ class FleetIntegration:
             self._send_download_notification()
             raise
 
-    async def _download_and_start_print(
-        self, filename: str, local_path: str
+    async def _handle_download_only(
+        self, web_request: WebRequest
     ) -> Dict[str, Any]:
-        """Execute the download-and-print sequence."""
+        """Download a fleet file to this printer without starting a print."""
+        filename = web_request.get_str("filename")
+
+        if (self._download_status is not None
+                and self._download_status["status"] in (
+                    "requesting", "downloading"
+                )):
+            raise self.server.error(
+                f"Download already in progress: "
+                f"{self._download_status['filename']}"
+            )
+
+        fm: FileManager = self.server.lookup_component("file_manager")
+        gcodes_path = fm.get_directory("gcodes")
+        if not gcodes_path:
+            raise self.server.error("Gcodes directory not configured")
+
+        local_path = os.path.join(gcodes_path, FLEET_SUBDIR, filename)
+        if os.path.isfile(local_path):
+            return {
+                "status": "already_local",
+                "filename": filename,
+            }
+
+        self._download_status = {
+            "filename": filename,
+            "status": "requesting",
+        }
+        self._send_download_notification()
+
+        try:
+            await self._download_fleet_file(filename, local_path)
+            self._download_status = {
+                "filename": filename,
+                "status": "complete",
+            }
+            self._send_download_notification()
+            await self._refresh_fleet_files()
+            return {
+                "status": "downloaded",
+                "filename": filename,
+            }
+        except Exception as e:
+            self._download_status = {
+                "filename": filename,
+                "status": "error",
+                "error": str(e),
+            }
+            self._send_download_notification()
+            raise
+
+    async def _download_fleet_file(
+        self, filename: str, local_path: str
+    ) -> None:
+        """Download a fleet file to this printer (no print)."""
         # Step 1: Tell fleet_daemon to push the file to us
         url = f"{self.fleet_url}/gcodes/download"
         body = {
@@ -350,7 +408,6 @@ class FleetIntegration:
         }
         self._send_download_notification()
 
-        # Poll for file appearance (fleet_daemon pushes via our upload API)
         timeout = self.download_timeout
         poll_interval = 2
         elapsed = 0
@@ -365,18 +422,21 @@ class FleetIntegration:
                 f"({timeout}s)"
             )
 
-        # Step 3: Wait a moment for Moonraker's file manager to detect
-        # and process metadata (inotify triggers metadata parsing)
+        # Step 3: Wait for metadata processing
         self._download_status = {
             "filename": filename,
             "status": "processing",
         }
         self._send_download_notification()
-
-        # Give file manager time to detect file and parse metadata
         await asyncio.sleep(3)
 
-        # Step 4: Start print
+    async def _download_and_start_print(
+        self, filename: str, local_path: str
+    ) -> Dict[str, Any]:
+        """Download a fleet file then start printing it."""
+        await self._download_fleet_file(filename, local_path)
+
+        # Start print
         self._download_status = {
             "filename": filename,
             "status": "starting_print",
