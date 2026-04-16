@@ -46,9 +46,10 @@ class FleetIntegration:
         self.fleet_url = fleet_url
         import socket as _socket
         default_hostname = _socket.gethostname().lower()
-        self.printer_hostname = config.get(
-            "printer_hostname", default_hostname
-        ).lower()
+        hostname = config.get("printer_hostname", default_hostname).lower()
+        if not hostname.endswith('.local'):
+            hostname += '.local'
+        self.printer_hostname = hostname
         self.poll_interval = config.getint("poll_interval", default=300)
         self.download_timeout = config.getint("download_timeout", default=600)
 
