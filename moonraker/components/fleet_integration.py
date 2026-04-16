@@ -59,6 +59,7 @@ class FleetIntegration:
         self._ws_task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._download_status: Optional[Dict[str, Any]] = None
+        self._download_lock = asyncio.Lock()
         self._is_closing = False
 
         # Register endpoints
@@ -172,7 +173,7 @@ class FleetIntegration:
                     continue
                 event = data.get("event")
                 if event == "gcodes_updated":
-                    logging.debug("[Fleet] Received gcodes_updated event")
+                    logging.info("[Fleet] Received gcodes_updated, refreshing file list")
                     await self._refresh_fleet_files()
 
     # ------------------------------------------------------------------
@@ -220,7 +221,7 @@ class FleetIntegration:
                     "fleet:files_changed",
                     {"files": self._fleet_files}
                 )
-                logging.debug(
+                logging.info(
                     f"[Fleet] Refreshed file list: {len(self._fleet_files)} files"
                 )
             else:
@@ -239,7 +240,8 @@ class FleetIntegration:
     async def _handle_fleet_files(
         self, web_request: WebRequest
     ) -> Dict[str, Any]:
-        """Return cached fleet file list."""
+        """Return fleet file list, refreshing from fleet_daemon first."""
+        await self._refresh_fleet_files()
         return {
             "files": self._fleet_files,
             "connected": self._connected,
@@ -271,17 +273,12 @@ class FleetIntegration:
         """
         filename = web_request.get_str("filename")
 
-        # Validate: not already downloading
-        if (self._download_status is not None
-                and self._download_status["status"] in (
-                    "requesting", "downloading", "starting_print"
-                )):
+        if self._download_lock.locked():
             raise self.server.error(
                 f"Download already in progress: "
-                f"{self._download_status['filename']}"
+                f"{(self._download_status or {}).get('filename', '?')}"
             )
 
-        # Check if file already exists locally
         fm: FileManager = self.server.lookup_component("file_manager")
         gcodes_path = fm.get_directory("gcodes")
         if not gcodes_path:
@@ -299,26 +296,21 @@ class FleetIntegration:
                 "cached": True,
             }
 
-        # Set download status and notify clients
-        self._download_status = {
-            "filename": filename,
-            "status": "requesting",
-        }
-        self._send_download_notification()
-
-        try:
-            result = await self._download_and_start_print(
-                filename, local_path
-            )
-            return result
-        except Exception as e:
-            self._download_status = {
-                "filename": filename,
-                "status": "error",
-                "error": str(e),
-            }
-            self._send_download_notification()
-            raise
+        async with self._download_lock:
+            self._set_status(filename, "requesting")
+            try:
+                result = await self._download_and_start_print(
+                    filename, local_path
+                )
+                return result
+            except Exception as e:
+                self._set_status(filename, "error", str(e))
+                raise
+            finally:
+                # Clear status after a delay so UI can see the final state
+                await asyncio.sleep(5)
+                self._download_status = None
+                self._send_download_notification()
 
     async def _handle_download_only(
         self, web_request: WebRequest
@@ -326,13 +318,10 @@ class FleetIntegration:
         """Download a fleet file to this printer without starting a print."""
         filename = web_request.get_str("filename")
 
-        if (self._download_status is not None
-                and self._download_status["status"] in (
-                    "requesting", "downloading"
-                )):
+        if self._download_lock.locked():
             raise self.server.error(
                 f"Download already in progress: "
-                f"{self._download_status['filename']}"
+                f"{(self._download_status or {}).get('filename', '?')}"
             )
 
         fm: FileManager = self.server.lookup_component("file_manager")
@@ -347,32 +336,23 @@ class FleetIntegration:
                 "filename": filename,
             }
 
-        self._download_status = {
-            "filename": filename,
-            "status": "requesting",
-        }
-        self._send_download_notification()
-
-        try:
-            await self._download_fleet_file(filename, local_path)
-            self._download_status = {
-                "filename": filename,
-                "status": "complete",
-            }
-            self._send_download_notification()
-            await self._refresh_fleet_files()
-            return {
-                "status": "downloaded",
-                "filename": filename,
-            }
-        except Exception as e:
-            self._download_status = {
-                "filename": filename,
-                "status": "error",
-                "error": str(e),
-            }
-            self._send_download_notification()
-            raise
+        async with self._download_lock:
+            self._set_status(filename, "requesting")
+            try:
+                await self._download_fleet_file(filename, local_path)
+                self._set_status(filename, "complete")
+                await self._refresh_fleet_files()
+                return {
+                    "status": "downloaded",
+                    "filename": filename,
+                }
+            except Exception as e:
+                self._set_status(filename, "error", str(e))
+                raise
+            finally:
+                await asyncio.sleep(5)
+                self._download_status = None
+                self._send_download_notification()
 
     async def _download_fleet_file(
         self, filename: str, local_path: str
@@ -403,11 +383,7 @@ class FleetIntegration:
             )
 
         # Step 2: Wait for the file to appear locally
-        self._download_status = {
-            "filename": filename,
-            "status": "downloading",
-        }
-        self._send_download_notification()
+        self._set_status(filename, "downloading")
 
         timeout = self.download_timeout
         poll_interval = 2
@@ -424,11 +400,7 @@ class FleetIntegration:
             )
 
         # Step 3: Wait for metadata processing
-        self._download_status = {
-            "filename": filename,
-            "status": "processing",
-        }
-        self._send_download_notification()
+        self._set_status(filename, "processing")
         await asyncio.sleep(3)
 
     async def _download_and_start_print(
@@ -437,12 +409,7 @@ class FleetIntegration:
         """Download a fleet file then start printing it."""
         await self._download_fleet_file(filename, local_path)
 
-        # Start print
-        self._download_status = {
-            "filename": filename,
-            "status": "starting_print",
-        }
-        self._send_download_notification()
+        self._set_status(filename, "starting_print")
 
         kapis: APIComp = self.server.lookup_component("klippy_apis")
         print_path = f"{FLEET_SUBDIR}/{filename}"
@@ -453,14 +420,7 @@ class FleetIntegration:
                 f"Failed to start print after download: {e}"
             )
 
-        # Success
-        self._download_status = {
-            "filename": filename,
-            "status": "complete",
-        }
-        self._send_download_notification()
-
-        # Refresh fleet files to update is_local flags
+        self._set_status(filename, "complete")
         await self._refresh_fleet_files()
 
         return {
@@ -468,6 +428,15 @@ class FleetIntegration:
             "filename": filename,
             "cached": False,
         }
+
+    def _set_status(
+        self, filename: str, status: str, error: Optional[str] = None
+    ) -> None:
+        """Update download status and notify clients."""
+        self._download_status = {"filename": filename, "status": status}
+        if error:
+            self._download_status["error"] = error
+        self._send_download_notification()
 
     def _send_download_notification(self) -> None:
         """Broadcast download status to all connected clients."""
