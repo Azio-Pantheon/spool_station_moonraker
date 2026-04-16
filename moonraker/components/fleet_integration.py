@@ -88,9 +88,12 @@ class FleetIntegration:
             "fleet:download_status", "fleet_download_status"
         )
 
-        # Register event handler
+        # Register event handlers
         self.server.register_event_handler(
             "server:klippy_ready", self._on_klippy_ready
+        )
+        self.server.register_event_handler(
+            "file_manager:filelist_changed", self._on_local_filelist_changed
         )
 
     async def component_init(self) -> None:
@@ -111,6 +114,43 @@ class FleetIntegration:
             f"[Fleet] Integration initialized: {self.fleet_url}, "
             f"hostname={self.printer_hostname}"
         )
+
+    def _on_local_filelist_changed(self, result: Dict[str, Any]) -> None:
+        """Called when local files change (upload, delete, move).
+        Re-evaluate is_local flags on fleet files."""
+        item = result.get("item", {})
+        path = item.get("path", "")
+        # Only care about changes in fleet_gcodes/
+        if not path.startswith(f"{FLEET_SUBDIR}/") and path != FLEET_SUBDIR:
+            return
+        self._update_local_flags()
+
+    def _update_local_flags(self, force_notify: bool = False) -> None:
+        """Re-check is_local for all fleet files and notify clients if changed."""
+        if not self._fleet_files:
+            return
+        fm: FileManager = self.server.lookup_component("file_manager")
+        gcodes_path = fm.get_directory("gcodes")
+        changed = False
+        for f in self._fleet_files:
+            if gcodes_path:
+                local_path = os.path.join(
+                    gcodes_path, FLEET_SUBDIR, f["filename"]
+                )
+                is_local = os.path.isfile(local_path)
+            else:
+                is_local = False
+            was_local = f.get("is_local", False)
+            if was_local != is_local:
+                f["is_local"] = is_local
+                changed = True
+        if changed or force_notify:
+            self.server.send_event(
+                "fleet:files_changed",
+                {"files": self._fleet_files}
+            )
+            if changed:
+                logging.info("[Fleet] Local flags updated after file change")
 
     def _on_klippy_ready(self) -> None:
         # Ensure fleet_gcodes directory exists on printer
@@ -202,25 +242,8 @@ class FleetIntegration:
             if resp.status_code == 200:
                 data = jsonw.loads(resp.content)
                 self._fleet_files = data.get("files", [])
-
-                # Mark which files are locally available
-                fm: FileManager = self.server.lookup_component("file_manager")
-                gcodes_path = fm.get_directory("gcodes")
-                if gcodes_path:
-                    for f in self._fleet_files:
-                        local_path = os.path.join(
-                            gcodes_path, FLEET_SUBDIR, f["filename"]
-                        )
-                        f["is_local"] = os.path.isfile(local_path)
-                else:
-                    for f in self._fleet_files:
-                        f["is_local"] = False
-
-                # Notify clients
-                self.server.send_event(
-                    "fleet:files_changed",
-                    {"files": self._fleet_files}
-                )
+                # Set initial is_local flags and notify
+                self._update_local_flags(force_notify=True)
                 logging.info(
                     f"[Fleet] Refreshed file list: {len(self._fleet_files)} files"
                 )
