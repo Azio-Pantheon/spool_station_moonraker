@@ -492,28 +492,25 @@ class FleetIntegration:
 
         logging.info(f"[Fleet] File arrived: {found_path}")
 
-        # Step 3: Wait for Moonraker to finish processing metadata
+        # Step 3: Brief wait for Moonraker inotify to detect the file
         self._set_status(filename, "processing")
+        await asyncio.sleep(2)
 
         # Determine the Moonraker-relative path for start_print
-        # Check which metadata key exists
+        # Check which metadata key the file is registered under
         fm2: FileManager = self.server.lookup_component("file_manager")
-        print_path = f"{FLEET_SUBDIR}/{filename}"
         for candidate in (
             f"{FLEET_SUBDIR}/{filename}",
             f"{FLEET_SUBDIR}/{encoded_filename}",
         ):
-            for _ in range(10):
-                await asyncio.sleep(1)
-                meta = fm2.gcode_metadata.get(candidate, None)
-                if meta is not None:
-                    print_path = candidate
-                    logging.info(f"[Fleet] Metadata ready at: {print_path}")
-                    return print_path
-            # Try next candidate
+            meta = fm2.gcode_metadata.get(candidate, None)
+            if meta is not None:
+                logging.info(f"[Fleet] Metadata found at: {candidate}")
+                return candidate
 
-        logging.warning(f"[Fleet] Metadata not ready, using: {print_path}")
-        return print_path
+        # Fallback — metadata may still be parsing, use the raw path
+        logging.info(f"[Fleet] Using fallback path: {FLEET_SUBDIR}/{filename}")
+        return f"{FLEET_SUBDIR}/{filename}"
 
     async def _download_and_start_print(
         self, filename: str, local_path: str
