@@ -59,7 +59,7 @@ class FleetIntegration:
         self._ws_task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._download_status: Optional[Dict[str, Any]] = None
-        self._download_lock = asyncio.Lock()
+        self._download_active = False
         self._is_closing = False
 
         # Register endpoints
@@ -321,7 +321,7 @@ class FleetIntegration:
         progress is reported via fleet:download_status notifications."""
         filename = web_request.get_str("filename")
 
-        if self._download_lock.locked():
+        if self._download_active:
             raise self.server.error(
                 f"Download already in progress: "
                 f"{(self._download_status or {}).get('filename', '?')}"
@@ -359,7 +359,7 @@ class FleetIntegration:
         """Queue a fleet file download without printing. Returns immediately."""
         filename = web_request.get_str("filename")
 
-        if self._download_lock.locked():
+        if self._download_active:
             raise self.server.error(
                 f"Download already in progress: "
                 f"{(self._download_status or {}).get('filename', '?')}"
@@ -391,22 +391,23 @@ class FleetIntegration:
     ) -> None:
         """Background task: download file, optionally start print.
         Updates status via notifications throughout."""
-        async with self._download_lock:
-            self._set_status(filename, "requesting")
-            try:
-                if start_print:
-                    await self._download_and_start_print(filename, local_path)
-                else:
-                    await self._download_fleet_file(filename, local_path)
-                    self._set_status(filename, "complete")
-                    await self._refresh_fleet_files()
-            except Exception as e:
-                logging.exception(f"[Fleet] Background download failed: {filename}")
-                self._set_status(filename, "error", str(e))
-            finally:
-                await asyncio.sleep(5)
-                self._download_status = None
-                self._send_download_notification()
+        self._download_active = True
+        self._set_status(filename, "requesting")
+        try:
+            if start_print:
+                await self._download_and_start_print(filename, local_path)
+            else:
+                await self._download_fleet_file(filename, local_path)
+                self._set_status(filename, "complete")
+                await self._refresh_fleet_files()
+        except Exception as e:
+            logging.exception(f"[Fleet] Background download failed: {filename}")
+            self._set_status(filename, "error", str(e))
+        finally:
+            self._download_active = False
+            await asyncio.sleep(3)
+            self._download_status = None
+            self._send_download_notification()
 
     async def _download_fleet_file(
         self, filename: str, local_path: str
