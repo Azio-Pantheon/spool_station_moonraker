@@ -117,13 +117,21 @@ class FleetIntegration:
 
     def _on_local_filelist_changed(self, result: Dict[str, Any]) -> None:
         """Called when local files change (upload, delete, move).
-        Re-evaluate is_local flags on fleet files."""
+        Re-evaluate is_local flags on fleet files.
+        On deletion, notify fleet_daemon to clear its cache entry."""
+        action = result.get("action", "")
         item = result.get("item", {})
         path = item.get("path", "")
         # Only care about changes in fleet_gcodes/
         if not path.startswith(f"{FLEET_SUBDIR}/") and path != FLEET_SUBDIR:
             return
         self._update_local_flags()
+        # Notify fleet_daemon when a fleet file is deleted locally
+        if action == "delete_file" and self.fleet_url:
+            fleet_filename = path[len(FLEET_SUBDIR) + 1:]  # strip "fleet_gcodes/"
+            self.eventloop.create_task(
+                self._notify_fleet_cache_removed(fleet_filename)
+            )
 
     def _update_local_flags(self, force_notify: bool = False) -> None:
         """Re-check is_local for all fleet files and notify clients if changed."""
@@ -151,6 +159,30 @@ class FleetIntegration:
             )
             if changed:
                 logging.info("[Fleet] Local flags updated after file change")
+
+    async def _notify_fleet_cache_removed(self, fleet_filename: str) -> None:
+        """Tell fleet_daemon that a cached file was deleted from this printer."""
+        url = f"{self.fleet_url}/gcodes/uncache"
+        body = {
+            "filename": fleet_filename,
+            "printer_hostname": self.printer_hostname,
+        }
+        try:
+            resp = await self.http_client.request(
+                "POST", url, body=body, request_timeout=10.
+            )
+            if resp.status_code == 200:
+                logging.info(
+                    f"[Fleet] Notified fleet_daemon: cache removed "
+                    f"{fleet_filename} from {self.printer_hostname}"
+                )
+            else:
+                logging.warning(
+                    f"[Fleet] Failed to notify cache removal: "
+                    f"HTTP {resp.status_code}"
+                )
+        except Exception as e:
+            logging.warning(f"[Fleet] Failed to notify cache removal: {e}")
 
     def _on_klippy_ready(self) -> None:
         # Ensure fleet_gcodes directory exists on printer
