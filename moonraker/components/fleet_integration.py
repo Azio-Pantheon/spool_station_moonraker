@@ -285,15 +285,8 @@ class FleetIntegration:
     async def _handle_download_and_print(
         self, web_request: WebRequest
     ) -> Dict[str, Any]:
-        """Download a fleet file to this printer and start printing it.
-
-        Flow:
-        1. POST to fleet_daemon's download queue
-        2. fleet_daemon uploads file to this printer via Moonraker upload API
-        3. Watch for file to appear in gcodes/fleet_gcodes/
-        4. Wait for metadata processing
-        5. Start print via klippy_apis
-        """
+        """Queue a fleet file download and print. Returns immediately;
+        progress is reported via fleet:download_status notifications."""
         filename = web_request.get_str("filename")
 
         if self._download_lock.locked():
@@ -319,26 +312,19 @@ class FleetIntegration:
                 "cached": True,
             }
 
-        async with self._download_lock:
-            self._set_status(filename, "requesting")
-            try:
-                result = await self._download_and_start_print(
-                    filename, local_path
-                )
-                return result
-            except Exception as e:
-                self._set_status(filename, "error", str(e))
-                raise
-            finally:
-                # Clear status after a delay so UI can see the final state
-                await asyncio.sleep(5)
-                self._download_status = None
-                self._send_download_notification()
+        # Launch in background — return immediately
+        self.eventloop.create_task(
+            self._bg_download(filename, local_path, start_print=True)
+        )
+        return {
+            "status": "queued",
+            "filename": filename,
+        }
 
     async def _handle_download_only(
         self, web_request: WebRequest
     ) -> Dict[str, Any]:
-        """Download a fleet file to this printer without starting a print."""
+        """Queue a fleet file download without printing. Returns immediately."""
         filename = web_request.get_str("filename")
 
         if self._download_lock.locked():
@@ -359,19 +345,32 @@ class FleetIntegration:
                 "filename": filename,
             }
 
+        # Launch in background — return immediately
+        self.eventloop.create_task(
+            self._bg_download(filename, local_path, start_print=False)
+        )
+        return {
+            "status": "queued",
+            "filename": filename,
+        }
+
+    async def _bg_download(
+        self, filename: str, local_path: str, start_print: bool
+    ) -> None:
+        """Background task: download file, optionally start print.
+        Updates status via notifications throughout."""
         async with self._download_lock:
             self._set_status(filename, "requesting")
             try:
-                await self._download_fleet_file(filename, local_path)
-                self._set_status(filename, "complete")
-                await self._refresh_fleet_files()
-                return {
-                    "status": "downloaded",
-                    "filename": filename,
-                }
+                if start_print:
+                    await self._download_and_start_print(filename, local_path)
+                else:
+                    await self._download_fleet_file(filename, local_path)
+                    self._set_status(filename, "complete")
+                    await self._refresh_fleet_files()
             except Exception as e:
+                logging.exception(f"[Fleet] Background download failed: {filename}")
                 self._set_status(filename, "error", str(e))
-                raise
             finally:
                 await asyncio.sleep(5)
                 self._download_status = None
@@ -422,13 +421,26 @@ class FleetIntegration:
                 f"({timeout}s)"
             )
 
-        # Step 3: Wait for metadata processing
+        # Step 3: Wait for Moonraker to detect and process metadata
         self._set_status(filename, "processing")
-        await asyncio.sleep(3)
+        # Wait up to 30s for metadata to be available
+        fm: FileManager = self.server.lookup_component("file_manager")
+        metadata_path = f"{FLEET_SUBDIR}/{filename}"
+        for _ in range(15):
+            await asyncio.sleep(2)
+            try:
+                meta = fm.gcode_metadata.get(metadata_path, None)
+                if meta is not None:
+                    logging.info(f"[Fleet] Metadata ready for {filename}")
+                    break
+            except Exception:
+                pass
+        else:
+            logging.warning(f"[Fleet] Metadata not ready after 30s, proceeding anyway")
 
     async def _download_and_start_print(
         self, filename: str, local_path: str
-    ) -> Dict[str, Any]:
+    ) -> None:
         """Download a fleet file then start printing it."""
         await self._download_fleet_file(filename, local_path)
 
@@ -437,20 +449,17 @@ class FleetIntegration:
         kapis: APIComp = self.server.lookup_component("klippy_apis")
         print_path = f"{FLEET_SUBDIR}/{filename}"
         try:
+            logging.info(f"[Fleet] Starting print: {print_path}")
             await kapis.start_print(print_path)
+            logging.info(f"[Fleet] Print started: {print_path}")
         except Exception as e:
+            logging.error(f"[Fleet] Failed to start print: {e}")
             raise self.server.error(
                 f"Failed to start print after download: {e}"
             )
 
         self._set_status(filename, "complete")
         await self._refresh_fleet_files()
-
-        return {
-            "status": "started",
-            "filename": filename,
-            "cached": False,
-        }
 
     def _set_status(
         self, filename: str, status: str, error: Optional[str] = None
