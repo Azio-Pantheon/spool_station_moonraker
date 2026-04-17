@@ -119,16 +119,23 @@ class FleetIntegration:
         """Called when local files change (upload, delete, move).
         Re-evaluate is_local flags on fleet files.
         On deletion, notify fleet_daemon to clear its cache entry."""
+        import urllib.parse
         action = result.get("action", "")
         item = result.get("item", {})
         path = item.get("path", "")
         # Only care about changes in fleet_gcodes/
         if not path.startswith(f"{FLEET_SUBDIR}/") and path != FLEET_SUBDIR:
             return
+        # Skip thumbnail files
+        if "/.thumbs/" in path:
+            return
         self._update_local_flags()
         # Notify fleet_daemon when a fleet file is deleted locally
         if action == "delete_file" and self.fleet_url:
             fleet_filename = path[len(FLEET_SUBDIR) + 1:]  # strip "fleet_gcodes/"
+            # URL-decode: Moonraker sends URL-encoded paths, fleet_daemon uses literal
+            fleet_filename = urllib.parse.unquote(fleet_filename)
+            logging.info(f"[Fleet] Local delete detected: {fleet_filename}")
             self.eventloop.create_task(
                 self._notify_fleet_cache_removed(fleet_filename)
             )
@@ -411,8 +418,9 @@ class FleetIntegration:
 
     async def _download_fleet_file(
         self, filename: str, local_path: str
-    ) -> None:
-        """Download a fleet file to this printer (no print)."""
+    ) -> str:
+        """Download a fleet file to this printer (no print).
+        Returns the Moonraker-relative path for use with start_print."""
         # Step 1: Tell fleet_daemon to push the file to us
         url = f"{self.fleet_url}/gcodes/download"
         body = {
@@ -438,49 +446,84 @@ class FleetIntegration:
             )
 
         # Step 2: Wait for the file to appear locally
+        # fleet_daemon uploads via Moonraker's upload API, which may
+        # URL-encode the filename. Check both variants.
+        import urllib.parse
         self._set_status(filename, "downloading")
+
+        encoded_filename = urllib.parse.quote(filename, safe="/")
+        local_path_encoded = os.path.join(
+            os.path.dirname(local_path),
+            urllib.parse.quote(os.path.basename(filename), safe="")
+        )
 
         timeout = self.download_timeout
         poll_interval = 2
         elapsed = 0
+        found_path = None
         while elapsed < timeout:
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
             if os.path.isfile(local_path):
+                found_path = local_path
                 break
-        else:
+            if local_path_encoded != local_path and os.path.isfile(local_path_encoded):
+                found_path = local_path_encoded
+                break
+            # Also check via Moonraker's file manager metadata
+            fm: FileManager = self.server.lookup_component("file_manager")
+            for meta_path in (
+                f"{FLEET_SUBDIR}/{filename}",
+                f"{FLEET_SUBDIR}/{encoded_filename}",
+            ):
+                meta = fm.gcode_metadata.get(meta_path, None)
+                if meta is not None:
+                    logging.info(f"[Fleet] File detected via metadata: {meta_path}")
+                    found_path = local_path
+                    break
+            if found_path:
+                break
+
+        if found_path is None:
             raise self.server.error(
                 f"Download timed out waiting for {filename} "
                 f"({timeout}s)"
             )
 
-        # Step 3: Wait for Moonraker to detect and process metadata
+        logging.info(f"[Fleet] File arrived: {found_path}")
+
+        # Step 3: Wait for Moonraker to finish processing metadata
         self._set_status(filename, "processing")
-        # Wait up to 30s for metadata to be available
-        fm: FileManager = self.server.lookup_component("file_manager")
-        metadata_path = f"{FLEET_SUBDIR}/{filename}"
-        for _ in range(15):
-            await asyncio.sleep(2)
-            try:
-                meta = fm.gcode_metadata.get(metadata_path, None)
+
+        # Determine the Moonraker-relative path for start_print
+        # Check which metadata key exists
+        fm2: FileManager = self.server.lookup_component("file_manager")
+        print_path = f"{FLEET_SUBDIR}/{filename}"
+        for candidate in (
+            f"{FLEET_SUBDIR}/{filename}",
+            f"{FLEET_SUBDIR}/{encoded_filename}",
+        ):
+            for _ in range(10):
+                await asyncio.sleep(1)
+                meta = fm2.gcode_metadata.get(candidate, None)
                 if meta is not None:
-                    logging.info(f"[Fleet] Metadata ready for {filename}")
-                    break
-            except Exception:
-                pass
-        else:
-            logging.warning(f"[Fleet] Metadata not ready after 30s, proceeding anyway")
+                    print_path = candidate
+                    logging.info(f"[Fleet] Metadata ready at: {print_path}")
+                    return print_path
+            # Try next candidate
+
+        logging.warning(f"[Fleet] Metadata not ready, using: {print_path}")
+        return print_path
 
     async def _download_and_start_print(
         self, filename: str, local_path: str
     ) -> None:
         """Download a fleet file then start printing it."""
-        await self._download_fleet_file(filename, local_path)
+        print_path = await self._download_fleet_file(filename, local_path)
 
         self._set_status(filename, "starting_print")
 
         kapis: APIComp = self.server.lookup_component("klippy_apis")
-        print_path = f"{FLEET_SUBDIR}/{filename}"
         try:
             logging.info(f"[Fleet] Starting print: {print_path}")
             await kapis.start_print(print_path)
