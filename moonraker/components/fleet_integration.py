@@ -87,6 +87,9 @@ class FleetIntegration:
         self.server.register_notification(
             "fleet:download_status", "fleet_download_status"
         )
+        self.server.register_notification(
+            "fleet:connection_status", "fleet_connection_status"
+        )
 
         # Register event handlers
         self.server.register_event_handler(
@@ -229,10 +232,14 @@ class FleetIntegration:
             else:
                 self._connected = True
                 logging.info("[Fleet] Connected to fleet_daemon")
+                self._send_connection_notification()
                 await self._read_ws_messages(ws)
                 log_connect = True
 
+            was_connected = self._connected
             self._connected = False
+            if was_connected:
+                self._send_connection_notification()
             if not self._is_closing:
                 await asyncio.sleep(5.)
 
@@ -548,6 +555,16 @@ class FleetIntegration:
         self.server.send_event(
             "fleet:download_status",
             {"download_status": self._download_status}
+        )
+
+    def _send_connection_notification(self) -> None:
+        """Broadcast fleet_daemon link state to all connected clients."""
+        self.server.send_event(
+            "fleet:connection_status",
+            {
+                "connected": self._connected,
+                "fleet_url": self.fleet_url,
+            }
         )
 
     # ------------------------------------------------------------------
