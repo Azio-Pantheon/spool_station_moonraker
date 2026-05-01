@@ -103,7 +103,8 @@ class FleetIntegration:
         self.http_client: HttpClient = self.server.lookup_component(
             "http_client"
         )
-        # Initial fetch
+        # Initial fetch — folders first so any later download has its parent in place
+        await self._refresh_fleet_folders()
         await self._refresh_fleet_files()
         # Start WebSocket connection
         self._ws_task = self.eventloop.create_task(
@@ -260,6 +261,7 @@ class FleetIntegration:
                 event = data.get("event")
                 if event == "gcodes_updated":
                     logging.info("[Fleet] Received gcodes_updated, refreshing file list")
+                    await self._refresh_fleet_folders()
                     await self._refresh_fleet_files()
 
     # ------------------------------------------------------------------
@@ -272,6 +274,7 @@ class FleetIntegration:
             await asyncio.sleep(self.poll_interval)
             if not self._connected:
                 # Only poll when WebSocket is down
+                await self._refresh_fleet_folders()
                 await self._refresh_fleet_files()
 
     # ------------------------------------------------------------------
@@ -301,6 +304,47 @@ class FleetIntegration:
             raise
         except Exception as e:
             logging.debug(f"[Fleet] Failed to fetch files: {e}")
+
+    async def _refresh_fleet_folders(self) -> None:
+        """Fetch folder structure from fleet_daemon and create matching local subdirs."""
+        url = f"{self.fleet_url}/gcodes/fleet-folders"
+        try:
+            resp = await self.http_client.request(
+                "GET", url, request_timeout=10.
+            )
+            if resp.status_code != 200:
+                logging.warning(
+                    f"[Fleet] Failed to fetch folders: HTTP {resp.status_code}"
+                )
+                return
+            data = jsonw.loads(resp.content)
+            folders = data.get("folders", [])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.debug(f"[Fleet] Failed to fetch folders: {e}")
+            return
+
+        fm: FileManager = self.server.lookup_component("file_manager")
+        gcodes_path = fm.get_directory("gcodes")
+        if not gcodes_path:
+            return
+
+        fleet_root = os.path.join(gcodes_path, FLEET_SUBDIR)
+        created = 0
+        for rel in folders:
+            rel_norm = rel.strip("/").replace("\\", "/")
+            if not rel_norm or ".." in rel_norm.split("/"):
+                continue
+            target = os.path.join(fleet_root, rel_norm)
+            if not os.path.isdir(target):
+                try:
+                    os.makedirs(target, exist_ok=True)
+                    created += 1
+                except OSError as e:
+                    logging.warning(f"[Fleet] mkdir failed for {target}: {e}")
+        if created:
+            logging.info(f"[Fleet] Created {created} fleet subdirectories from daemon")
 
     # ------------------------------------------------------------------
     # API Handlers
