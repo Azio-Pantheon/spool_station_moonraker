@@ -793,6 +793,7 @@ class KlippyConnection:
             "is_purging": self.shared_printer_config.is_purging,
             "enable_prime": self.shared_printer_config.enable_prime,
             "is_primed": self.shared_printer_config.is_primed,
+            "is_fleet_worker": self.shared_printer_config.is_fleet_worker,
         }
 
     def _inject_machine_state(
@@ -825,6 +826,21 @@ class KlippyConnection:
         self.shared_printer_config.is_primed = value
         logging.info(f"Prime state set to {value}")
         self.push_machine_state()
+
+    def set_fleet_worker(self, value: int) -> None:
+        # Owned by fleet_daemon (see fleet_integration).  Persisted so the
+        # flag is restored on startup; never cleared on klippy disconnect.
+        value = 1 if value else 0
+        if value == self.shared_printer_config.is_fleet_worker:
+            return
+        self.shared_printer_config.is_fleet_worker = value
+        logging.info(f"Fleet worker flag set to {value}")
+        self.push_machine_state()
+        db: Database = self.server.lookup_component('database')
+        try:
+            db.insert_item("HS3", "is_fleet_worker", value)
+        except Exception:
+            logging.exception("Failed to persist is_fleet_worker")
 
     async def handle_prime_state_request(
         self, web_request: WebRequest

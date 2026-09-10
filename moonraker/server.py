@@ -66,7 +66,8 @@ CORE_COMPONENTS = [
 ]
 
 class SharedPrinterConfig:
-    def __init__(self, filament='N/A', nozzle='N/A', wet_filament_purge=1, last_print_time=0,is_purging=0,enable_prime=1, is_primed=0):
+    def __init__(self, filament='N/A', nozzle='N/A', wet_filament_purge=1, last_print_time=0,is_purging=0,enable_prime=1, is_primed=0,
+                 is_fleet_worker=0):
         self.filament = filament
         self.nozzle = nozzle
         self.wet_filament_purge = int(wet_filament_purge)
@@ -76,6 +77,11 @@ class SharedPrinterConfig:
         # Runtime only, never persisted. 0 = bed not confirmed clear.
         # Reset to 0 on Klipper disconnect and whenever a print starts or ends.
         self.is_primed = int(is_primed)
+        # Set by fleet_integration from fleet_daemon's worker list and
+        # persisted in the HS3 database namespace so the badge survives a
+        # Moonraker restart while the daemon is unreachable.  Unlike
+        # is_primed it is NOT cleared on Klipper disconnect or print start.
+        self.is_fleet_worker = int(is_fleet_worker)
 
 class Server:
     error = ServerError

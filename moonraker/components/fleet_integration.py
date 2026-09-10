@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from .http_client import HttpClient
     from .klippy_apis import KlippyAPI as APIComp
     from .file_manager.file_manager import FileManager
+    from .klippy_connection import KlippyConnection
 
 FLEET_SUBDIR = "fleet_gcodes"
 
@@ -234,6 +235,7 @@ class FleetIntegration:
                 self._connected = True
                 logging.info("[Fleet] Connected to fleet_daemon")
                 self._send_connection_notification()
+                await self._refresh_worker_flag()
                 await self._read_ws_messages(ws)
                 log_connect = True
 
@@ -263,6 +265,53 @@ class FleetIntegration:
                     logging.info("[Fleet] Received gcodes_updated, refreshing file list")
                     await self._refresh_fleet_folders()
                     await self._refresh_fleet_files()
+                elif event == "workers_updated":
+                    logging.info("[Fleet] Received workers_updated, refreshing worker flag")
+                    await self._refresh_worker_flag()
+
+    # ------------------------------------------------------------------
+    # Fleet worker flag
+    # ------------------------------------------------------------------
+
+    async def _refresh_worker_flag(self) -> None:
+        """Ask fleet_daemon whether this printer is an enabled fleet worker
+        and mirror the answer into machine_state.is_fleet_worker.
+        404 means the daemon does not know this printer (not a worker).
+        On a network error the last known value is kept."""
+        url = f"{self.fleet_url}/workers/{self.printer_hostname}"
+        try:
+            resp = await self.http_client.request(
+                "GET", url, request_timeout=10.
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.debug(f"[Fleet] Failed to fetch worker flag: {e}")
+            return
+        if resp.status_code == 200:
+            try:
+                data = jsonw.loads(resp.content)
+            except Exception as e:
+                logging.debug(f"[Fleet] Invalid worker response: {e}")
+                return
+            value = 1 if data.get("enabled") else 0
+        elif resp.status_code == 404:
+            value = 0
+        else:
+            logging.debug(
+                f"[Fleet] Failed to fetch worker flag: HTTP {resp.status_code}"
+            )
+            return
+        kconn: KlippyConnection = self.server.lookup_component(
+            "klippy_connection"
+        )
+        kconn.set_fleet_worker(value)
+
+    def _get_worker_flag(self) -> int:
+        kconn: KlippyConnection = self.server.lookup_component(
+            "klippy_connection"
+        )
+        return int(kconn.shared_printer_config.is_fleet_worker)
 
     # ------------------------------------------------------------------
     # Poll fallback
@@ -370,6 +419,7 @@ class FleetIntegration:
             "printer_hostname": self.printer_hostname,
             "file_count": len(self._fleet_files),
             "download_status": self._download_status,
+            "is_fleet_worker": self._get_worker_flag(),
         }
 
     async def _handle_download_and_print(

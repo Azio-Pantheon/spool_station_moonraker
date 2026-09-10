@@ -211,6 +211,7 @@ class MoonrakerDatabase:
             "last_print_time":     ("last_print_time",     float, 0.0),
             "is_purging":          ("is_purging",          int,   0),
             "enable_prime":        ("enable_prime",        int,   0),
+            "is_fleet_worker":     ("is_fleet_worker",     int,   0),
             "spool_qr_code":       ("spool_qr_code",       str,   ""),
         }
 
@@ -861,6 +862,8 @@ class MoonrakerDatabase:
                     self.shared_printer_config.is_purging = int(val['is_purging']) 
                 if 'enable_prime' in val:
                     self.shared_printer_config.enable_prime = int(val['enable_prime'])     
+                if 'is_fleet_worker' in val:
+                    self.shared_printer_config.is_fleet_worker = int(val['is_fleet_worker'])
         elif req_type == RequestType.POST:
             val = web_request.get("value")
             await self.insert_item(namespace, key, val)
@@ -883,6 +886,8 @@ class MoonrakerDatabase:
                     self.shared_printer_config.is_purging = int(val)
                 elif key == 'enable_prime':
                     self.shared_printer_config.enable_prime = int(val)
+                elif key == 'is_fleet_worker':
+                    self.shared_printer_config.is_fleet_worker = int(val)
         elif req_type == RequestType.DELETE:
             val = await self.delete_item(namespace, key, drop_empty_db=True)
 
