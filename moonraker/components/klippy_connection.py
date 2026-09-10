@@ -104,6 +104,12 @@ class KlippyConnection:
         
         self.shared_printer_config = shared_printer_config
         self.previous_state = None  # To track the last known state
+        self._last_eventtime: float = 0.
+        # Prime state: set to 1 only by an explicit client request
+        # (the operator confirming the bed is clear on the touchscreen).
+        # Cleared on Klipper disconnect and on any print start/end.
+        # The /machine/prime_state endpoint is registered by klippy_apis,
+        # because this component is constructed before the web app exists.
 
     @property
     def klippy_apis(self) -> KlippyAPI:
@@ -541,9 +547,21 @@ class KlippyConnection:
         self, eventtime: float, status: Dict[str, Dict[str, Any]]
     ) -> None:
         
+        self._last_eventtime = eventtime
         # tracking the time for last print job
         if "print_stats" in status and "state" in status["print_stats"]:
             current_state = status["print_stats"]["state"]
+            # Once a print starts the bed can no longer be assumed clear, and
+            # once it ends there is a part on it.  Either way: not primed.
+            if (
+                current_state != self.previous_state and
+                current_state in ("printing", "complete", "cancelled", "error")
+            ):
+                if self.shared_printer_config.is_primed:
+                    logging.info(
+                        f"Print state '{current_state}': clearing prime state"
+                    )
+                self.shared_printer_config.is_primed = 0
             # If the state changes from "printing" to "complete", log the time
             if self.previous_state == "printing" and current_state == "complete":
                 self.shared_printer_config.last_print_time = time.time()
@@ -585,14 +603,9 @@ class KlippyConnection:
                 },
             })
 
-            # Ensure that "toolhead" exists in the status dictionary
+            # Publish the synthesized machine_state object
             status.setdefault("machine_state", {})
-
-            # Update the toolhead section with filament and nozzle information
-            status["machine_state"].update({
-                "is_purging": self.shared_printer_config.is_purging,
-                "enable_prime": self.shared_printer_config.enable_prime
-            })
+            status["machine_state"].update(self._machine_state_status())
 
 
         except KeyError:
@@ -652,7 +665,12 @@ class KlippyConnection:
                 if script:
                     self.server.send_event(
                         "klippy_connection:gcode_received", script)
-            return await self._request_standard(web_request)
+            result = await self._request_standard(web_request)
+            if rpc_method == "objects/query":
+                self._inject_machine_state(
+                    web_request.get_args().get('objects', {}), result
+                )
+            return result
 
     async def _request_subscripton(self, web_request: WebRequest) -> Dict[str, Any]:
         async with self.subscription_lock:
@@ -734,6 +752,7 @@ class KlippyConnection:
                     del self.subscription_cache[obj_name]
             result['status'] = pruned_status
             self.subscriptions[conn] = requested_sub
+            self._inject_machine_state(requested_sub, result)
             return result
 
     async def _request_standard(
@@ -768,6 +787,58 @@ class KlippyConnection:
 
     def get_subscription_cache(self) -> Dict[str, Dict[str, Any]]:
         return self.subscription_cache
+
+    def _machine_state_status(self) -> Dict[str, Any]:
+        return {
+            "is_purging": self.shared_printer_config.is_purging,
+            "enable_prime": self.shared_printer_config.enable_prime,
+            "is_primed": self.shared_printer_config.is_primed,
+        }
+
+    def _inject_machine_state(
+        self, objects: Dict[str, Any], result: Any
+    ) -> None:
+        # machine_state is not a Klipper object, so query/subscribe
+        # responses never contain it.  Add the current values so clients
+        # have them immediately instead of waiting for the next update.
+        if not isinstance(objects, dict) or "machine_state" not in objects:
+            return
+        if not isinstance(result, dict):
+            return
+        fields = objects.get("machine_state")
+        ms = self._machine_state_status()
+        if fields is not None:
+            ms = {k: v for k, v in ms.items() if k in fields}
+        result.setdefault("status", {})["machine_state"] = ms
+
+    def push_machine_state(self) -> None:
+        # Push the current machine_state to all subscribers now rather
+        # than waiting for the next Klipper status update.
+        if not self.subscriptions:
+            return
+        self._process_status_update(self._last_eventtime, {"machine_state": {}})
+
+    def set_prime_state(self, value: int) -> None:
+        value = 1 if value else 0
+        if value == self.shared_printer_config.is_primed:
+            return
+        self.shared_printer_config.is_primed = value
+        logging.info(f"Prime state set to {value}")
+        self.push_machine_state()
+
+    async def handle_prime_state_request(
+        self, web_request: WebRequest
+    ) -> Dict[str, Any]:
+        if web_request.get_request_type() == RequestType.POST:
+            value = web_request.get_int("value")
+            if value not in (0, 1):
+                raise self.server.error("'value' must be 0 or 1", 400)
+            if value == 1 and self.previous_state in ("printing", "paused"):
+                raise self.server.error(
+                    "Cannot mark the printer primed while a print is active", 400
+                )
+            self.set_prime_state(value)
+        return {"is_primed": self.shared_printer_config.is_primed}
 
     async def rollover_log(self) -> None:
         if "unit_name" not in self._service_info:
@@ -814,6 +885,12 @@ class KlippyConnection:
         self.subscription_cache.clear()
         self._peer_cred = {}
         self._missing_reqs.clear()
+        # Klipper restarted, host restarted or power cycled: the bed state
+        # is unknown, so require a fresh prime confirmation.
+        if self.shared_printer_config.is_primed:
+            logging.info("Klippy disconnected: clearing prime state")
+        self.shared_printer_config.is_primed = 0
+        self.previous_state = None
         logging.info("Klippy Connection Removed")
         await self.server.send_event("server:klippy_disconnect")
         if self.server.is_running():

@@ -76,6 +76,12 @@ class KlippyAPI(APITransport):
         self.server.register_endpoint(
             "/printer/firmware_restart", RequestType.POST, self._gcode_firmware_restart
         )
+        # Prime state (machine_state.is_primed) lives in klippy_connection,
+        # which loads before the web app, so its endpoint is registered here.
+        self.server.register_endpoint(
+            "/machine/prime_state", RequestType.GET | RequestType.POST,
+            self.klippy.handle_prime_state_request
+        )
         self.server.register_event_handler(
             "server:klippy_disconnect", self._on_klippy_disconnect
         )
