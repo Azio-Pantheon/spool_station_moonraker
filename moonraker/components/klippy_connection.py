@@ -108,10 +108,8 @@ class KlippyConnection:
         # Prime state: set to 1 only by an explicit client request
         # (the operator confirming the bed is clear on the touchscreen).
         # Cleared on Klipper disconnect and on any print start/end.
-        self.server.register_endpoint(
-            "/machine/prime_state", RequestType.GET | RequestType.POST,
-            self._handle_prime_state_request
-        )
+        # The /machine/prime_state endpoint is registered by klippy_apis,
+        # because this component is constructed before the web app exists.
 
     @property
     def klippy_apis(self) -> KlippyAPI:
@@ -828,7 +826,7 @@ class KlippyConnection:
         logging.info(f"Prime state set to {value}")
         self.push_machine_state()
 
-    async def _handle_prime_state_request(
+    async def handle_prime_state_request(
         self, web_request: WebRequest
     ) -> Dict[str, Any]:
         if web_request.get_request_type() == RequestType.POST:
