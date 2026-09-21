@@ -11,6 +11,7 @@ import asyncio
 from datetime import datetime
 import logging
 import os
+import re
 import time
 
 
@@ -44,6 +45,14 @@ SUBSCRIPTION_ENDPOINT = "objects/subscribe"
 STATUS_ENDPOINT = "objects/query"
 OBJ_LIST_ENDPOINT = "objects/list"
 REG_METHOD_ENDPOINT = "register_remote_method"
+
+# Gcode scripts that physically move filament through the nozzle (load/unload
+# macros and manual extrude/retract moves).  After any of these the bed and
+# nozzle can no longer be assumed clean, so the prime confirmation is cleared.
+PRIME_CLEARING_GCODE = re.compile(
+    r"^\s*(?:LOAD_FILAMENT|UNLOAD_FILAMENT)\b|^\s*G1\s+E",
+    re.IGNORECASE | re.MULTILINE
+)
 
 class KlippyAPI(APITransport):
     def __init__(self, config: ConfigHelper, shared_printer_config) -> None:
@@ -177,6 +186,8 @@ class KlippyAPI(APITransport):
         params = {'script': script}
         result = await self._send_klippy_request(
             GCODE_ENDPOINT, params, default)
+        if PRIME_CLEARING_GCODE.search(script):
+            self.klippy.set_prime_state(0)
         return result
     
     async def _async_insert_last_print_time(self, database, last_print_time: float) -> None:

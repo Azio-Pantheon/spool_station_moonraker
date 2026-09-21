@@ -888,6 +888,12 @@ class MoonrakerDatabase:
                     self.shared_printer_config.enable_prime = int(val)
                 elif key == 'is_fleet_worker':
                     self.shared_printer_config.is_fleet_worker = int(val)
+                if key in ('filament_type', 'nozzle_size', 'nozzle_type'):
+                    # Filament and nozzle changes are the start of a physical
+                    # intervention on the printer, so the bed can no longer be
+                    # assumed clear.  Require a fresh prime confirmation.
+                    kconn = self.server.lookup_component("klippy_connection")
+                    kconn.set_prime_state(0)
         elif req_type == RequestType.DELETE:
             val = await self.delete_item(namespace, key, drop_empty_db=True)
 

@@ -991,7 +991,14 @@ class SpoolTracker:
                         "spool_qr_code": self.spool_qr_code,
                     }
                 )
-        
+
+            if new_type is not None or new_weight is not None or new_qr_code is not None:
+                # Any spool change (type, weight, or QR) means the operator is
+                # physically handling filament, so require a fresh prime
+                # confirmation.  set_prime_state() no-ops when already 0.
+                kconn = self.server.lookup_component("klippy_connection")
+                kconn.set_prime_state(0)
+
         # Return current filament info (for both GET and POST)
         all_types = list(FILAMENT_TYPES.keys()) + list(self.custom_filaments.keys())
         
