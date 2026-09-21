@@ -22,11 +22,18 @@ if TYPE_CHECKING:
     from ..common import WebRequest
     from .database import MoonrakerDatabase as DBComp
     from .job_state import JobState
+    from .klippy_apis import KlippyAPI
     from .file_manager.file_manager import FileManager
 
 HIST_NAMESPACE = "history"
 HIST_VERSION = 1
 MAX_JOBS = 10000
+# A print still running when Moonraker reconnects to Klippy is only adopted
+# as a continuation of the last record after a deliberate Moonraker restart:
+# the last record closed as "server_exit" (clean shutdown — a crash leaves
+# "interrupted" and is not resumed), has the same filename, and closed no
+# more than this many seconds before the reconnect.
+RESUME_WINDOW = 120.
 
 class History:
     def __init__(self, config: ConfigHelper) -> None:
@@ -52,6 +59,8 @@ class History:
             "server:klippy_shutdown", self._handle_shutdown)
         self.server.register_event_handler(
             "job_state:state_changed", self._on_job_state_changed)
+        self.server.register_event_handler(
+            "server:klippy_ready", self._handle_klippy_ready)
         self.server.register_notification("history:history_changed")
 
         self.server.register_endpoint(
@@ -243,6 +252,82 @@ class History:
         jstate: JobState = self.server.lookup_component("job_state")
         last_ps = jstate.get_last_stats()
         self.finish_job("klippy_disconnect", last_ps)
+
+    async def _handle_klippy_ready(self) -> None:
+        # Resume tracking a print that is already running when Moonraker
+        # reconnects to Klippy after a manual restart. Klipper keeps printing
+        # through a Moonraker restart, so the job closed on exit as
+        # "server_exit" is only a partial record; without this the print's
+        # completion would never be recorded at all.
+        #
+        # Strict: only when the last history record is a "server_exit" record
+        # for the same filename that closed within RESUME_WINDOW seconds of
+        # now, and the running print started before that exit. Anything else
+        # (crash, long outage, different file) is left alone. The new record
+        # takes the original record's start_time so the fleet daemon can pair
+        # the two (fleet_job_scheduler.RELINK_SQL).
+        if self.current_job is not None:
+            return
+        if not self.cached_job_ids:
+            return
+        kapis: KlippyAPI = self.server.lookup_component("klippy_apis")
+        try:
+            result = await kapis.query_objects({"print_stats": None})
+        except self.server.error:
+            logging.exception("History: print_stats query failed on klippy ready")
+            return
+        ps: Dict[str, Any] = result.get("print_stats", {})
+        state = ps.get("state")
+        if state not in ("printing", "paused"):
+            return
+        filename = ps.get("filename")
+        total = ps.get("total_duration")
+        if not filename or not isinstance(total, (int, float)) or total <= 0:
+            return
+        prev_id = self.cached_job_ids[-1]
+        prev: Dict[str, Any] = await self.history_ns.get(prev_id, {})
+        prev_status = prev.get("status")
+        prev_end = prev.get("end_time")
+        if prev_status != "server_exit":
+            logging.info(
+                f"History: print '{filename}' running on klippy ready but the "
+                f"last record ({prev_id}) is '{prev_status}', not resuming"
+            )
+            return
+        if prev.get("filename") != filename:
+            logging.info(
+                f"History: print '{filename}' running on klippy ready but the "
+                f"last server_exit record ({prev_id}) is for "
+                f"'{prev.get('filename')}', not resuming"
+            )
+            return
+        now = time.time()
+        gap = now - float(prev_end) if isinstance(prev_end, (int, float)) else None
+        if gap is None or gap < 0 or gap > RESUME_WINDOW:
+            logging.info(
+                f"History: print '{filename}' running on klippy ready but the "
+                f"last server_exit record ({prev_id}) closed "
+                f"{gap if gap is None else round(gap)}s ago "
+                f"(window {RESUME_WINDOW:.0f}s), not resuming"
+            )
+            return
+        if float(total) < gap:
+            # Started after the exit: a new print of the same file, not ours.
+            logging.info(
+                f"History: print '{filename}' running on klippy ready started "
+                f"after the last server_exit record ({prev_id}), not resuming"
+            )
+            return
+        job = PrinterJob(ps)
+        prev_start = prev.get("start_time")
+        if isinstance(prev_start, (int, float)):
+            job.start_time = float(prev_start)
+        logging.info(
+            f"History: resuming tracking of in-flight print '{filename}' "
+            f"(state={state}, total_duration={total:.0f}s) as a continuation "
+            f"of server_exit record {prev_id} closed {gap:.0f}s ago"
+        )
+        self.add_job(job)
 
     def add_job(self, job: PrinterJob) -> None:
         if len(self.cached_job_ids) >= MAX_JOBS:
