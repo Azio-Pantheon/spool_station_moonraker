@@ -183,12 +183,21 @@ class KlippyAPI(APITransport):
             # except Exception as e:
             #     logging.warning(f"Dribble test failed (non-blocking): {e}")
 
+            # The purge can run for minutes.  If the operator cleared the
+            # prime confirmation meanwhile (e.g. by loading filament) the
+            # print must not start behind it.
+            self._require_primed()
+
         params = {'script': script}
-        result = await self._send_klippy_request(
-            GCODE_ENDPOINT, params, default)
+        # Clear the prime confirmation BEFORE the script runs, not after.  A
+        # load/unload macro holds Klipper's gcode queue for many seconds and
+        # during that window the printer must not look primed to the fleet
+        # daemon (2026-09-24: a job was dispatched mid-load and started the
+        # moment the macro finished).  Clearing first also survives a macro
+        # that errors out.
         if PRIME_CLEARING_GCODE.search(script):
             self.klippy.set_prime_state(0)
-        return result
+        return await self._send_klippy_request(GCODE_ENDPOINT, params, default)
     
     async def _async_insert_last_print_time(self, database, last_print_time: float) -> None:
         try:
@@ -294,6 +303,13 @@ class KlippyAPI(APITransport):
             f"(images saved to {tmpdir})"
         )
 
+    def _require_primed(self) -> None:
+        cfg = self.shared_printer_config
+        if cfg.enable_prime == 1 and cfg.is_primed != 1:
+            raise self.server.error(
+                "Printer not primed: confirm the bed is clear on the "
+                "touchscreen before starting a print", 400)
+
     async def start_print(
         self, filename: str, wait_klippy_started: bool = False
     ) -> str:
@@ -303,6 +319,10 @@ class KlippyAPI(APITransport):
         # Doing so will result in "wait_started" blocking for the specifed
         # timeout (default 20s) and returning False.
         # XXX - validate that file is on disk
+        # The prime confirmation is the operator's word that the bed is clear.
+        # Enforce it here, on the printer, so no client (fleet daemon, Mainsail,
+        # a stale cache) can start a print around it.
+        self._require_primed()
         if filename[0] == '/':
             filename = filename[1:]
         # Escape existing double quotes in the file name
