@@ -61,6 +61,15 @@ MAX_LOG_ATTEMPTS = 10 * LOG_ATTEMPT_INTERVAL
 UNIX_BUFFER_LIMIT = 20 * 1024 * 1024
 SVC_INFO_KEY = "klippy_connection.service_info"
 
+# Klippy RPC methods re-published as "klippy_connection:request_received"
+# (with the WebRequest) for the activity log.
+TRACKED_RPC_METHODS = frozenset({
+    "gcode/script", "emergency_stop", "pause_resume/pause",
+    "pause_resume/resume", "pause_resume/cancel", "gcode/restart",
+    "gcode/firmware_restart",
+})
+
+
 class KlippyConnection:
     def __init__(self, config: ConfigHelper, shared_printer_config) -> None:
         self.server = config.get_server()
@@ -561,6 +570,9 @@ class KlippyConnection:
                     logging.info(
                         f"Print state '{current_state}': clearing prime state"
                     )
+                    self.server.send_event(
+                        "klippy_connection:prime_state_changed",
+                        0, "print_state")
                 self.shared_printer_config.is_primed = 0
             # If the state changes from "printing" to "complete", log the time
             if self.previous_state == "printing" and current_state == "complete":
@@ -665,6 +677,12 @@ class KlippyConnection:
                 if script:
                     self.server.send_event(
                         "klippy_connection:gcode_received", script)
+            if rpc_method in TRACKED_RPC_METHODS:
+                # Additive: carries the request so the activity log can
+                # attribute the action to its client.
+                self.server.send_event(
+                    "klippy_connection:request_received",
+                    rpc_method, web_request)
             result = await self._request_standard(web_request)
             if rpc_method == "objects/query":
                 self._inject_machine_state(
@@ -819,13 +837,15 @@ class KlippyConnection:
             return
         self._process_status_update(self._last_eventtime, {"machine_state": {}})
 
-    def set_prime_state(self, value: int) -> None:
+    def set_prime_state(self, value: int, reason: str = "request") -> None:
         value = 1 if value else 0
         if value == self.shared_printer_config.is_primed:
             return
         self.shared_printer_config.is_primed = value
         logging.info(f"Prime state set to {value}")
         self.push_machine_state()
+        self.server.send_event(
+            "klippy_connection:prime_state_changed", value, reason)
 
     def set_fleet_worker(self, value: int) -> None:
         # Owned by fleet_daemon (see fleet_integration).  Persisted so the
@@ -836,6 +856,8 @@ class KlippyConnection:
         self.shared_printer_config.is_fleet_worker = value
         logging.info(f"Fleet worker flag set to {value}")
         self.push_machine_state()
+        self.server.send_event(
+            "klippy_connection:fleet_worker_changed", value)
         db: Database = self.server.lookup_component('database')
         try:
             db.insert_item("HS3", "is_fleet_worker", value)
@@ -905,6 +927,8 @@ class KlippyConnection:
         # is unknown, so require a fresh prime confirmation.
         if self.shared_printer_config.is_primed:
             logging.info("Klippy disconnected: clearing prime state")
+            self.server.send_event(
+                "klippy_connection:prime_state_changed", 0, "klippy_disconnect")
         self.shared_printer_config.is_primed = 0
         self.previous_state = None
         logging.info("Klippy Connection Removed")

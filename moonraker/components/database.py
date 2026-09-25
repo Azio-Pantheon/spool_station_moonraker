@@ -41,6 +41,19 @@ if TYPE_CHECKING:
 
 DATABASE_VERSION = 1
 MAX_NAMESPACES = 100
+# HS3 namespace key -> SharedPrinterConfig attribute (for change tracking)
+HS3_ATTR_MAP = {
+    "filament_type": "filament",
+    "nozzle_size": "nozzle",
+    "nozzle_type": "nozzle_type",
+    "nozzle_life": "nozzle_life",
+    "remaining_nozzle_life": "remaining_nozzle_life",
+    "wet_filament_purge": "wet_filament_purge",
+    "is_purging": "is_purging",
+    "enable_prime": "enable_prime",
+    "is_fleet_worker": "is_fleet_worker",
+    "spool_qr_code": "spool_qr_code",
+}
 MAX_DB_SIZE = 200 * 2**20
 
 RECORD_ENCODE_FUNCS = {
@@ -868,6 +881,9 @@ class MoonrakerDatabase:
             val = web_request.get("value")
             await self.insert_item(namespace, key, val)
             if namespace == 'HS3':
+                old_val = getattr(
+                    self.shared_printer_config, HS3_ATTR_MAP.get(key, ""), None
+                ) if isinstance(key, str) else None
                 if key == 'filament_type':
                     self.shared_printer_config.filament = val
                 elif key == 'nozzle_size':
@@ -893,7 +909,12 @@ class MoonrakerDatabase:
                     # intervention on the printer, so the bed can no longer be
                     # assumed clear.  Require a fresh prime confirmation.
                     kconn = self.server.lookup_component("klippy_connection")
-                    kconn.set_prime_state(0)
+                    kconn.set_prime_state(0, "hs3_change")
+                # Additive: lets the activity log record HS3 writes
+                # (KlipperScreen / Mainsail set filament, nozzle, worker flag).
+                self.server.send_event(
+                    "database:hs3_item_changed", key, val, old_val, web_request
+                )
         elif req_type == RequestType.DELETE:
             val = await self.delete_item(namespace, key, drop_empty_db=True)
 

@@ -9,6 +9,7 @@ import sys
 import logging
 import copy
 import re
+import contextvars
 from enum import Enum, Flag, auto
 from dataclasses import dataclass
 from abc import ABCMeta, abstractmethod
@@ -204,9 +205,21 @@ class APIDefinition:
         ip_addr: Optional[IPAddress] = None,
         user: Optional[Dict[str, Any]] = None
     ) -> Coroutine:
-        return self.callback(
+        return self._invoke(
             WebRequest(self.endpoint, args, request_type, transport, ip_addr, user)
         )
+
+    async def _invoke(self, web_request: WebRequest) -> Any:
+        # Every HTTP and JSON-RPC request passes through here.  Publish the
+        # request in a ContextVar so internal re-dispatches (klippy_apis
+        # re-issuing a print start for a UI caller, tasks and events spawned
+        # while servicing the request) can find the originating client.
+        # Used by the activity log for attribution.
+        token = current_api_request.set(web_request)
+        try:
+            return await self.callback(web_request)
+        finally:
+            current_api_request.reset(token)
 
     @property
     def need_object_parser(self) -> bool:
@@ -495,6 +508,11 @@ class BaseRemoteConnection(APITransport):
 
     def close_socket(self, code: int, reason: str) -> None:
         raise NotImplementedError("Children must implement close_socket()")
+
+
+# The API request the current task is servicing (see APIDefinition._invoke).
+current_api_request: contextvars.ContextVar[Optional["WebRequest"]] = \
+    contextvars.ContextVar("current_api_request", default=None)
 
 
 class WebRequest:

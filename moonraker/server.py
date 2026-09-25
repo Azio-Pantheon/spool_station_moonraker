@@ -62,7 +62,7 @@ CORE_COMPONENTS = [
     'dbus_manager', 'database', 'file_manager', 'authorization',
     'klippy_apis', 'machine', 'data_store', 'shell_command',
     'proc_stats', 'job_state', 'job_queue', 'http_client',
-    'announcements', 'webcam', 'extensions'
+    'announcements', 'webcam', 'extensions', 'activity'
 ]
 
 class SharedPrinterConfig:

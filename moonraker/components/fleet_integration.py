@@ -441,7 +441,11 @@ class FleetIntegration:
             raise self.server.error("Gcodes directory not configured")
 
         local_path = os.path.join(gcodes_path, FLEET_SUBDIR, filename)
-        if os.path.isfile(local_path):
+        cached = os.path.isfile(local_path)
+        # Activity log (additive)
+        self.server.send_event(
+            "fleet:download_requested", filename, True, cached)
+        if cached:
             # File already cached — just start the print
             kapis: APIComp = self.server.lookup_component("klippy_apis")
             print_path = f"{FLEET_SUBDIR}/{filename}"
@@ -479,6 +483,9 @@ class FleetIntegration:
             raise self.server.error("Gcodes directory not configured")
 
         local_path = os.path.join(gcodes_path, FLEET_SUBDIR, filename)
+        self.server.send_event(
+            "fleet:download_requested", filename, False,
+            os.path.isfile(local_path))
         if os.path.isfile(local_path):
             return {
                 "status": "already_local",

@@ -798,6 +798,35 @@ class SpoolTracker:
                     logging.warning(
                         f"Failed to reset remaining_nozzle_life in database: {e}"
                     )
+
+            # Activity log events (additive)
+            if new_nozzle_life is not None or reset_remaining_nozzle_life:
+                self.server.send_event(
+                    "spool_tracker:nozzle_life_changed",
+                    {
+                        "nozzle_life": self.shared_printer_config.nozzle_life,
+                        "remaining_nozzle_life":
+                            self.shared_printer_config.remaining_nozzle_life,
+                        "reset": bool(reset_remaining_nozzle_life),
+                    }
+                )
+            odo_set = {
+                axis: val for axis, val in (
+                    ("x", odometer_x), ("y", odometer_y),
+                    ("z", odometer_z), ("e", odometer_e),
+                ) if val is not None
+            }
+            trip_reset = [
+                axis for axis, flag in (
+                    ("x", reset_tripmeter_x), ("y", reset_tripmeter_y),
+                    ("z", reset_tripmeter_z), ("e", reset_tripmeter_e),
+                ) if flag
+            ]
+            if odo_set or trip_reset:
+                self.server.send_event(
+                    "spool_tracker:meters_changed",
+                    {"odometer": odo_set, "tripmeter_reset": trip_reset}
+                )
         
         # Return current status (for both GET and POST)
         if not self._filament_exists(self.current_filament_type):
@@ -992,12 +1021,24 @@ class SpoolTracker:
                     }
                 )
 
+            if new_weight is not None or new_qr_code is not None:
+                # Activity log: a spool was physically loaded / registered.
+                self.server.send_event(
+                    "spool_tracker:spool_loaded",
+                    {
+                        "filament_type": self.current_filament_type,
+                        "weight": new_weight,
+                        "qr_code": self.spool_qr_code,
+                        "type_changed": new_type is not None,
+                    }
+                )
+
             if new_type is not None or new_weight is not None or new_qr_code is not None:
                 # Any spool change (type, weight, or QR) means the operator is
                 # physically handling filament, so require a fresh prime
                 # confirmation.  set_prime_state() no-ops when already 0.
                 kconn = self.server.lookup_component("klippy_connection")
-                kconn.set_prime_state(0)
+                kconn.set_prime_state(0, "spool_change")
 
         # Return current filament info (for both GET and POST)
         all_types = list(FILAMENT_TYPES.keys()) + list(self.custom_filaments.keys())
