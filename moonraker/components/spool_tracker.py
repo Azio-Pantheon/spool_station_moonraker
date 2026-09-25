@@ -8,11 +8,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import datetime
+import time
+import uuid
+from datetime import datetime, date
 from typing import (
     TYPE_CHECKING,
     Dict,
     Any,
+    List,
     Optional,
     Union,
 )
@@ -46,6 +49,16 @@ FILAMENT_TYPES = {
         "name": "95A Flex(TPU 95A)"
     },
 }
+
+
+# Daily service-tracker snapshots (odometers, tripmeters, nozzle life,
+# filament usage) kept permanently in their own namespace, one record per
+# local calendar day.  fleet_daemon collects them via
+# GET /server/spool_tracker/snapshots?since=YYYY-MM-DD.
+SNAPSHOT_NAMESPACE = "service_tracker_history"
+SNAPSHOT_CHECK_INTERVAL = 600.
+SNAPSHOT_FIRST_DELAY = 60.
+SNAPSHOT_LIST_MAX = 2000
 
 
 class SpoolTracker:
@@ -102,6 +115,13 @@ class SpoolTracker:
         
         # Timer for periodic reporting and database sync
         self.report_timer = self.eventloop.register_timer(self._report_usage)
+
+        # Daily service-tracker snapshots (permanent)
+        self.database.register_local_namespace(SNAPSHOT_NAMESPACE)
+        self.snapshot_ns = self.database.wrap_namespace(
+            SNAPSHOT_NAMESPACE, parse_keys=False
+        )
+        self.snapshot_timer = self.eventloop.register_timer(self._snapshot_check)
         
         # Component references
         self.klippy_apis: APIComp = self.server.lookup_component("klippy_apis")
@@ -314,6 +334,16 @@ class SpoolTracker:
             ["POST"],
             self._handle_register_custom_filament,
         )
+        self.server.register_endpoint(
+            "/server/spool_tracker/snapshots",
+            ["GET"],
+            self._handle_snapshots_list,
+        )
+        self.server.register_endpoint(
+            "/server/spool_tracker/snapshot",
+            ["POST"],
+            self._handle_snapshot_now,
+        )
 
     async def component_init(self) -> None:
         """Initialize component after server startup."""
@@ -321,7 +351,104 @@ class SpoolTracker:
         self.server.register_event_handler(
             "server:klippy_ready", self._handle_klippy_ready
         )
+        self.snapshot_timer.start(delay=SNAPSHOT_FIRST_DELAY)
         logging.info("Spool Tracker component initialized")
+
+    # ------------------------------------------------------------------
+    # Daily service-tracker snapshots
+    # ------------------------------------------------------------------
+    def build_snapshot(self) -> Dict[str, Any]:
+        """Current service-tracker data as a permanent snapshot record."""
+        spc = self.shared_printer_config
+        today = date.today().isoformat()
+        return {
+            "id": str(uuid.uuid4()),
+            "day": today,
+            "captured_at": time.time(),
+            "odometer": {
+                "x": self.odometer_x, "y": self.odometer_y,
+                "z": self.odometer_z, "e": self.odometer_e,
+            },
+            "tripmeter": {
+                "x": self.tripmeter_x, "y": self.tripmeter_y,
+                "z": self.tripmeter_z, "e": self.tripmeter_e,
+            },
+            "nozzle_life": float(getattr(spc, "nozzle_life", 0.) or 0.),
+            "remaining_nozzle_life": float(
+                getattr(spc, "remaining_nozzle_life", 0.) or 0.),
+            "nozzle_size": getattr(spc, "nozzle", None),
+            "nozzle_type": getattr(spc, "nozzle_type", None),
+            "filament_type": self.current_filament_type,
+            "spool_qr_code": self.spool_qr_code,
+            "weights": {
+                "initial_weight": self.initial_weight,
+                "used_weight": self.used_weight,
+                "remaining_weight": self.get_remaining_weight(),
+            },
+            "lengths": {
+                "used_length": self.used_length,
+                "remaining_length": self.get_remaining_length(),
+            },
+        }
+
+    async def _snapshot_check(self, eventtime: float) -> float:
+        """Write today's snapshot once (first opportunity after local
+        midnight or after startup)."""
+        try:
+            today = date.today().isoformat()
+            existing = await self.snapshot_ns.get(today, None)
+            if existing is None:
+                await self.capture_snapshot()
+        except Exception:
+            logging.exception("Spool Tracker: daily snapshot failed")
+        return eventtime + SNAPSHOT_CHECK_INTERVAL
+
+    async def capture_snapshot(self, force: bool = False) -> Dict[str, Any]:
+        snap = self.build_snapshot()
+        existing = await self.snapshot_ns.get(snap["day"], None)
+        if isinstance(existing, dict) and not force:
+            return existing
+        if isinstance(existing, dict) and existing.get("id"):
+            # keep the id stable for the day so collectors upsert in place
+            snap["id"] = existing["id"]
+        await self.snapshot_ns.insert(snap["day"], snap)
+        logging.info(
+            f"Spool Tracker: daily snapshot recorded for {snap['day']} "
+            f"(odometer x={self.odometer_x:.0f} y={self.odometer_y:.0f} "
+            f"z={self.odometer_z:.0f} e={self.odometer_e:.0f} mm)"
+        )
+        return snap
+
+    async def _handle_snapshots_list(
+        self, web_request: WebRequest
+    ) -> Dict[str, Any]:
+        since = web_request.get_str("since", None)
+        limit = web_request.get_int("limit", 400)
+        if limit <= 0 or limit > SNAPSHOT_LIST_MAX:
+            limit = SNAPSHOT_LIST_MAX
+        if since is not None:
+            try:
+                date.fromisoformat(since)
+            except ValueError:
+                raise self.server.error("'since' must be YYYY-MM-DD", 400)
+        keys: List[str] = await self.snapshot_ns.keys()
+        keys = sorted(k for k in keys if since is None or k >= since)
+        page = keys[:limit]
+        records = await self.snapshot_ns.get_batch(page) if page else {}
+        snapshots = [records[k] for k in page if isinstance(records.get(k), dict)]
+        return {
+            "snapshots": snapshots,
+            "count": len(snapshots),
+            "latest_day": keys[-1] if keys else None,
+            "has_more": len(keys) > limit,
+        }
+
+    async def _handle_snapshot_now(
+        self, web_request: WebRequest
+    ) -> Dict[str, Any]:
+        force = web_request.get_boolean("force", False)
+        snap = await self.capture_snapshot(force=force)
+        return {"snapshot": snap}
 
     async def _handle_klippy_ready(self) -> None:
         """Subscribe to Klipper status updates when ready."""
