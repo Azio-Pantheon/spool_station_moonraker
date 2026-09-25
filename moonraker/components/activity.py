@@ -96,6 +96,7 @@ SERVICE_TYPES: List[Tuple[str, str]] = [
     ("belts_motion", "Belts / motion"),
     ("bed_leveling", "Bed leveling"),
     ("lubrication", "Lubrication"),
+    ("desiccant_change", "Desiccant change"),
     ("firmware_config", "Firmware / config"),
     ("repair", "Repair"),
     ("inspection", "Inspection"),
