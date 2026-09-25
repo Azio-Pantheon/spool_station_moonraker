@@ -103,6 +103,8 @@ SERVICE_TYPES: List[Tuple[str, str]] = [
 ]
 SERVICE_TYPE_IDS = {sid for sid, _ in SERVICE_TYPES}
 SERVICE_TYPE_LABELS = dict(SERVICE_TYPES)
+# Service types that get a nozzle-health snapshot attached at record time
+NOZZLE_SERVICE_TYPES = frozenset({"nozzle_change"})
 
 TIER1_TYPES = frozenset({
     "print_started", "print_paused", "print_resumed", "print_completed",
@@ -440,9 +442,13 @@ class Activity:
                 rec is not None and not rec.get("deleted") and
                 now - float(rec.get("updated_at", 0.)) <= window
             ):
+                # Caller summary first so a merge callback that rebuilds the
+                # summary from the merged details (jog count, nozzle size +
+                # type + health) wins over the single-write summary.
+                if summary:
+                    rec["summary"] = _trim(summary, SUMMARY_MAX)
                 if merge is not None:
                     merge(rec, details)
-                rec["summary"] = _trim(summary, SUMMARY_MAX) if summary else rec["summary"]
                 rec["details"] = self._cap_details(rec.get("details", {}))
                 rec["updated_at"] = now
                 self._stage(rec)
@@ -603,7 +609,13 @@ class Activity:
                 details["truncated"] = True
         try:
             if len(jsonw.dumps(details)) > DETAILS_MAX_BYTES:
-                return {"truncated": True, "keys": sorted(details.keys())}
+                capped: Dict[str, Any] = {
+                    "truncated": True, "keys": sorted(details.keys())
+                }
+                for k in ("nozzle_health", "nozzle_health_after"):
+                    if isinstance(details.get(k), dict):
+                        capped[k] = details[k]
+                return capped
         except Exception:
             return {"truncated": True}
         return details
@@ -1008,6 +1020,17 @@ class Activity:
                 det["nozzle_size"], det["prev_size"] = val, old_val
             else:
                 det["nozzle_type"], det["prev_type"] = val, old_val
+            # Health of the nozzle being swapped out.  shared_printer_config
+            # already carries the new size/type, so put the previous ones
+            # back: the life counters have not been reset yet (that comes
+            # as a separate nozzle_life_reset event).
+            health = self._nozzle_health()
+            if health is not None:
+                if key == "nozzle_size":
+                    health["nozzle_size"] = old_val
+                else:
+                    health["nozzle_type"] = old_val
+                det["nozzle_health"] = health
 
             def merge_n(rec: Dict[str, Any], d: Dict[str, Any]) -> None:
                 rd = rec.setdefault("details", {})
@@ -1016,6 +1039,9 @@ class Activity:
                         rd[k] = d[k]
                     elif d.get(k) is not None and k in ("nozzle_size", "nozzle_type"):
                         rd[k] = d[k]
+                # keep the snapshot taken at the first write of the burst
+                if rd.get("nozzle_health") is None and d.get("nozzle_health"):
+                    rd["nozzle_health"] = d["nozzle_health"]
                 rec["summary"] = _trim(self._nozzle_summary(rd), SUMMARY_MAX)
 
             self._add(
@@ -1028,12 +1054,24 @@ class Activity:
                 fval = float(val)
             except (TypeError, ValueError):
                 fval = None
+            # shared_printer_config already holds the new value; rebuild the
+            # "before" snapshot from old_val.
+            after = self._nozzle_health()
+            before = self._with_pct(dict(after)) if after is not None else None
+            if before is not None:
+                try:
+                    before[key] = float(old_val) if old_val is not None else None
+                except (TypeError, ValueError):
+                    before[key] = None
+                before = self._with_pct(before)
             self._add(
                 "nozzle_life_reset", 1,
-                f"Nozzle life set ({key}={fval})",
+                f"Nozzle life set ({key}={fval})" + self._health_suffix(before),
                 {"nozzle_life": fval if key == "nozzle_life" else None,
                  "remaining_nozzle_life": fval if key == "remaining_nozzle_life" else fval,
-                 "reset": key == "remaining_nozzle_life"},
+                 "reset": key == "remaining_nozzle_life",
+                 "nozzle_health": before,
+                 "nozzle_health_after": after},
                 origin=origin, dedupe_key="remaining_nozzle_life",
                 dedupe_window=SHORT_DEDUPE_WINDOW,
             )
@@ -1049,14 +1087,66 @@ class Activity:
                 dedupe_key="enabled", dedupe_window=SHORT_DEDUPE_WINDOW,
             )
 
+    def _nozzle_health(self) -> Optional[Dict[str, Any]]:
+        """Nozzle health right now (spool_tracker is authoritative; fall
+        back to the shared printer config when it is not loaded)."""
+        st = self.server.lookup_component("spool_tracker", None)
+        if st is not None and hasattr(st, "nozzle_health"):
+            try:
+                return dict(st.nozzle_health())
+            except Exception:
+                logging.exception("Activity: spool_tracker.nozzle_health failed")
+        spc = getattr(self.server, "shared_printer_config", None)
+        if spc is None:
+            return None
+        try:
+            life = float(getattr(spc, "nozzle_life", 0.) or 0.)
+            remaining = float(getattr(spc, "remaining_nozzle_life", 0.) or 0.)
+        except (TypeError, ValueError):
+            return None
+        pct = round(max(0., min(100., remaining / life * 100.)), 1) if life > 0 else None
+        return {
+            "nozzle_life": life,
+            "remaining_nozzle_life": remaining,
+            "health_pct": pct,
+            "nozzle_size": getattr(spc, "nozzle", None),
+            "nozzle_type": getattr(spc, "nozzle_type", None),
+            "captured_at": time.time(),
+        }
+
     @staticmethod
-    def _nozzle_summary(d: Dict[str, Any]) -> str:
+    def _with_pct(h: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Recompute health_pct after nozzle_life / remaining were edited."""
+        if not h:
+            return h
+        try:
+            life = float(h.get("nozzle_life") or 0.)
+            rem = float(h.get("remaining_nozzle_life") or 0.)
+        except (TypeError, ValueError):
+            return h
+        h["health_pct"] = (
+            round(max(0., min(100., rem / life * 100.)), 1) if life > 0 else None
+        )
+        return h
+
+    @staticmethod
+    def _health_suffix(h: Optional[Dict[str, Any]]) -> str:
+        if not h or h.get("health_pct") is None:
+            return ""
+        return f" · nozzle at {h['health_pct']:.0f}%"
+
+    @classmethod
+    def _nozzle_summary(cls, d: Dict[str, Any]) -> str:
         parts = []
         if d.get("nozzle_size") is not None:
             parts.append(f"{d['nozzle_size']} mm")
         if d.get("nozzle_type") is not None:
             parts.append(str(d["nozzle_type"]))
-        return "Nozzle set: " + (" ".join(parts) if parts else "?")
+        text = "Nozzle set: " + (" ".join(parts) if parts else "?")
+        h = d.get("nozzle_health")
+        if isinstance(h, dict) and h.get("health_pct") is not None:
+            text += f" · previous nozzle at {h['health_pct']:.0f}%"
+        return text
 
     def _on_filament_changed(self, data: Dict[str, Any]) -> None:
         old_t, new_t = data.get("old_type"), data.get("new_type")
@@ -1085,12 +1175,17 @@ class Activity:
 
     def _on_nozzle_life(self, data: Dict[str, Any]) -> None:
         life = data.get("nozzle_life")
+        before = data.get("nozzle_health_before")
+        after = data.get("nozzle_health_after") or self._nozzle_health()
         self._add(
             "nozzle_life_reset", 1,
-            f"Nozzle life {'reset' if data.get('reset') else 'set'} ({life} kg)",
+            f"Nozzle life {'reset' if data.get('reset') else 'set'} ({life} kg)"
+            + self._health_suffix(before),
             {"nozzle_life": life,
              "remaining_nozzle_life": data.get("remaining_nozzle_life"),
-             "reset": bool(data.get("reset"))},
+             "reset": bool(data.get("reset")),
+             "nozzle_health": before,
+             "nozzle_health_after": after},
             origin=self.resolve_origin(None), dedupe_key="remaining_nozzle_life",
             dedupe_window=SHORT_DEDUPE_WINDOW,
         )
@@ -1316,15 +1411,24 @@ class Activity:
             "operator": operator,
             "comment": comment,
         }
+        if stype in NOZZLE_SERVICE_TYPES:
+            # Keep the snapshot taken when the event was first recorded; an
+            # edit days later must not overwrite it.
+            prev_health = cur.get("nozzle_health")
+            details["nozzle_health"] = (
+                prev_health if isinstance(prev_health, dict)
+                else self._nozzle_health()
+            )
         return details, float(service_time)
 
-    @staticmethod
-    def _service_summary(details: Dict[str, Any]) -> str:
+    @classmethod
+    def _service_summary(cls, details: Dict[str, Any]) -> str:
         label = details.get("service_type_label") or details.get("service_type")
         if details.get("service_type") == "other" and details.get("service_type_other"):
             label = details["service_type_other"]
         op = details.get("operator")
-        return f"Service: {label}" + (f" - {op}" if op else "")
+        text = f"Service: {label}" + (f" - {op}" if op else "")
+        return text + cls._health_suffix(details.get("nozzle_health"))
 
     async def _handle_service(self, web_request: WebRequest) -> Dict[str, Any]:
         self._require_ready()

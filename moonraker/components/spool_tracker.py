@@ -391,6 +391,36 @@ class SpoolTracker:
             },
         }
 
+    def nozzle_health(self) -> Dict[str, Any]:
+        """Current nozzle health as a small, self-contained snapshot.
+
+        Attached by the activity component to nozzle_set /
+        nozzle_life_reset / nozzle-change service events so the wear state
+        at the moment of a change is kept with the event (the live values
+        are overwritten by the reset that usually follows)."""
+        spc = self.shared_printer_config
+        try:
+            life = float(getattr(spc, "nozzle_life", 0.) or 0.)
+        except (TypeError, ValueError):
+            life = 0.
+        try:
+            remaining = float(getattr(spc, "remaining_nozzle_life", 0.) or 0.)
+        except (TypeError, ValueError):
+            remaining = 0.
+        pct: Optional[float] = None
+        if life > 0:
+            pct = round(max(0., min(100., remaining / life * 100.)), 1)
+        return {
+            "nozzle_life": life,
+            "remaining_nozzle_life": remaining,
+            "health_pct": pct,
+            "nozzle_size": getattr(spc, "nozzle", None),
+            "nozzle_type": getattr(spc, "nozzle_type", None),
+            "odometer_e": float(self.odometer_e or 0.),
+            "filament_type": self.current_filament_type,
+            "captured_at": time.time(),
+        }
+
     async def _snapshot_check(self, eventtime: float) -> float:
         """Write today's snapshot once (first opportunity after local
         midnight or after startup)."""
@@ -886,6 +916,10 @@ class SpoolTracker:
                 except Exception as e:
                     logging.warning(f"Failed to reset tripmeter_e in database: {e}")
             
+            # Nozzle health BEFORE this request touches it (the activity log
+            # keeps it with the nozzle_life_reset event).
+            nozzle_health_before = self.nozzle_health()
+
             # Handle nozzle life setting (sets both nozzle_life and remaining_nozzle_life)
             new_nozzle_life = web_request.get_float("nozzle_life", None)
             if new_nozzle_life is not None:
@@ -935,6 +969,8 @@ class SpoolTracker:
                         "remaining_nozzle_life":
                             self.shared_printer_config.remaining_nozzle_life,
                         "reset": bool(reset_remaining_nozzle_life),
+                        "nozzle_health_before": nozzle_health_before,
+                        "nozzle_health_after": self.nozzle_health(),
                     }
                 )
             odo_set = {
